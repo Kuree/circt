@@ -575,12 +575,9 @@ bool TypeLoweringVisitor::lowerArg(Operation *module, size_t argIndex,
     // be either a name or a number
     auto attrs = mlir::DictionaryAttr::get(
         context,
-        {{StringAttr::get("hw.debug.name.before", context),
+        {{StringAttr::get("hw.debug.name", context),
           StringAttr::get(context, originalName.str() + "." +
-                                       field.value().suffix.substr(1))},
-         {StringAttr::get("hw.debug.name.after", context),
-          StringAttr::get(context,
-                          originalName.str() + field.value().suffix)}});
+                                       field.value().suffix.substr(1))}});
 
     newValue.second.annotations.addAnnotations(attrs);
     newArgs.insert(newArgs.begin() + 1 + argIndex + field.index(),
@@ -638,8 +635,16 @@ bool TypeLoweringVisitor::visitStmt(ConnectOp op) {
 
   // We have to expand connections even if the aggregate preservation is true.
   if (!peelType(op.dest().getType(), fields,
-                /* allowedToPreserveAggregate */ false))
+                /* allowedToPreserveAggregate */ false)) {
+    // store the name as well
+    auto *dstOp = op.dest().getDefiningOp();
+    if (dstOp && dstOp->hasAttr("name")) {
+      auto nameAttr = dstOp->getAttr("name");
+      op->setAttr("hw.debug.name", nameAttr);
+    }
+
     return false;
+  }
 
   // Loop over the leaf aggregates.
   for (auto field : llvm::enumerate(fields)) {
@@ -1070,27 +1075,12 @@ bool TypeLoweringVisitor::visitDecl(FModuleOp module) {
   SmallVector<Attribute> newArgSyms;
   SmallVector<Attribute, 8> newArgAnnotations;
 
-  SmallVector<NamedAttribute> portRenames;
-
   for (auto &port : newArgs) {
     newArgDirections.push_back(port.direction);
-    printf("port name: %s\n", port.name.str().c_str());
     newArgNames.push_back(port.name);
     newArgTypes.push_back(TypeAttr::get(port.type));
     newArgSyms.push_back(port.sym ? port.sym : StringAttr::get(context, ""));
     newArgAnnotations.push_back(port.annotations.getArrayAttr());
-
-    // pass the renaming as proper annotation so it won't get lost in the
-    // lowering pass.
-    auto attrs = port.annotations.getArrayAttr();
-    for (auto const &attr : attrs) {
-      if (auto dict = attr.dyn_cast_or_null<DictionaryAttr>()) {
-        auto constexpr *key_name = "hw.debug.name";
-        if (dict.contains("hw.debug.name.before")) {
-
-        }
-      }
-    }
   }
 
   newModuleAttrs.push_back(
@@ -1107,14 +1097,10 @@ bool TypeLoweringVisitor::visitDecl(FModuleOp module) {
   newModuleAttrs.push_back(
       NamedAttribute(StringAttr::get("portAnnotations", context),
                      builder->getArrayAttr(newArgAnnotations)));
-  //newModuleAttrs.push_back(
-  //    NamedAttribute(StringAttr::get(getAnnotationAttrName(), context),
-  //                   moduleAnnotations.getArrayAttr()));
 
   // Update the module's attributes.
   module->setAttrs(newModuleAttrs);
 
-  AnnotationSet newModuleAnnotations(module);
   return false;
 }
 

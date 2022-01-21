@@ -896,7 +896,6 @@ FIRRTLModuleLowering::lowerModule(FModuleOp oldModule, Block *topLevelModule,
               hierAnno.getMember<StringAttr>("filename").getValue(),
               /*excludeFromFileList=*/true));
   };
-  printf("annos.size %ld\n", annos.size());
   if (annos.removeAnnotation(dutAnnoClass)) {
     setModuleHierarchyFileAttr(moduleHierAnnoClass);
     loweringState.setDut(oldModule);
@@ -970,8 +969,6 @@ FIRRTLModuleLowering::lowerModule(FModuleOp oldModule, Block *topLevelModule,
 
   if (failed)
     return {};
-  auto s = annos.size();
-  printf("anno size: %ld\n", s);
   loweringState.processRemainingAnnotations(oldModule, annos);
   return newModule;
 }
@@ -2696,8 +2693,20 @@ LogicalResult FIRRTLLowering::visitDecl(InstanceOp oldInstance) {
 
     // Create a wire for each input/inout operand, so there is
     // something to connect to.
-    Value wire =
-        createTmpWireOp(portType, "." + port.getName().str() + ".wire");
+    auto w = createTmpWireOp(portType, "." + port.getName().str() + ".wire");
+    Value wire = w;
+
+    // migrate the renaming process
+    auto *op = wire.getDefiningOp();
+    auto &annos = port.annotations;
+    if (op) {
+      for (auto const &attr : annos) {
+        auto const &dict = attr.getDict();
+        if (auto name = dict.get("hw.debug.name")) {
+          w->setAttr("hw.debug.name", name);
+        }
+      }
+    }
 
     // Know that the argument FIRRTL value is equal to this wire, allowing
     // connects to it to be lowered.
@@ -3237,7 +3246,11 @@ LogicalResult FIRRTLLowering::visitStmt(ConnectOp op) {
     return success();
   }
 
-  builder.create<sv::AssignOp>(destVal, srcVal);
+  auto newAssignOp = builder.create<sv::AssignOp>(destVal, srcVal);
+  if (op->hasAttr("hw.debug.name")) {
+    newAssignOp.getOperation()->setAttr("hw.debug.name",
+                                        op->getAttr("hw.debug.name"));
+  }
   return success();
 }
 
