@@ -233,6 +233,14 @@ static unsigned getBitWidthFromVectorSize(unsigned size) {
   return size == 1 ? 1 : llvm::Log2_64_Ceil(size);
 }
 
+// Try moving a name from an firrtl expression to a hw expression as a name
+// hint.  Dont' overwrite an existing name.
+static void tryCopyName(Operation *dst, Operation *src) {
+  if (auto attr = src->getAttrOfType<StringAttr>("name"))
+    if (!dst->hasAttr("sv.namehint") && !dst->hasAttr("name"))
+      dst->setAttr("sv.namehint", attr);
+}
+
 //===----------------------------------------------------------------------===//
 // firrtl.module Lowering Pass
 //===----------------------------------------------------------------------===//
@@ -1922,6 +1930,8 @@ LogicalResult FIRRTLLowering::setLoweringTo(Operation *orig,
     auto *op = result.getDefiningOp();
     op->setAttr("hw.debug.name", debugAttr);
   }
+  if (auto *op = result.getDefiningOp())
+    tryCopyName(op, orig);
   return setPossiblyFoldedLowering(orig->getResult(0), result);
 }
 
