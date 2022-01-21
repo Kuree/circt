@@ -465,6 +465,7 @@ bool TypeLoweringVisitor::lowerProducer(
   if (auto nameAttr = op->getAttr("name"))
     if (auto nameStrAttr = nameAttr.dyn_cast<StringAttr>())
       loweredName = nameStrAttr.getValue();
+  auto baseName = loweredName;
   auto baseNameLen = loweredName.size();
   auto oldAnno = op->getAttr("annotations").dyn_cast_or_null<ArrayAttr>();
 
@@ -486,6 +487,7 @@ bool TypeLoweringVisitor::lowerProducer(
     if (hasDontTouch)
       newOp->setAttr("inner_sym", StringAttr::get(context, loweredName));
 
+    newOp->setAttr("hw.debug.name", StringAttr::get(context, baseName));
     lowered.push_back(newOp->getResult(0));
   }
 
