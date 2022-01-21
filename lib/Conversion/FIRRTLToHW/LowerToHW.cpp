@@ -896,6 +896,7 @@ FIRRTLModuleLowering::lowerModule(FModuleOp oldModule, Block *topLevelModule,
               hierAnno.getMember<StringAttr>("filename").getValue(),
               /*excludeFromFileList=*/true));
   };
+  printf("annos.size %ld\n", annos.size());
   if (annos.removeAnnotation(dutAnnoClass)) {
     setModuleHierarchyFileAttr(moduleHierAnnoClass);
     loweringState.setDut(oldModule);
@@ -969,7 +970,8 @@ FIRRTLModuleLowering::lowerModule(FModuleOp oldModule, Block *topLevelModule,
 
   if (failed)
     return {};
-
+  auto s = annos.size();
+  printf("anno size: %ld\n", s);
   loweringState.processRemainingAnnotations(oldModule, annos);
   return newModule;
 }
