@@ -2,17 +2,18 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWVisitors.h"
+#include "circt/Dialect/SV/SVOps.h"
 #include "circt/Dialect/SV/SVVisitors.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Pass/Pass.h"
 
-namespace {
 mlir::StringRef getSymOpName(mlir::Operation *symOp);
-} // end anonymous namespace
 
 namespace circt::hw {
 mlir::StringAttr getVerilogModuleNameAttr(mlir::Operation *module);
@@ -54,7 +55,7 @@ struct HWDebugLineInfo : HWDebugScope {
       : HWDebugScope(context), type(type) {}
 };
 
-struct HWVarDef {
+struct HWDebugVarDef {
   std::string name;
   std::string value;
   // for how it's always RTL value
@@ -66,7 +67,7 @@ public:
   // module names
   std::string name;
 
-  std::vector<HWVarDef> variables;
+  std::vector<HWDebugVarDef> variables;
   std::map<std::string, std::string> instances;
 
   HWDebugFile *file = nullptr;
@@ -79,6 +80,7 @@ struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
       : HWDebugLineInfo(context, LineType::Declare), value(value) {}
 
   ::mlir::Value value;
+  HWDebugVarDef variable;
 };
 
 struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
@@ -86,6 +88,8 @@ struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
   HWDebugVarAssignLineInfo(HWDebugContext &context, ::mlir::Value target)
       : HWDebugLineInfo(context, LineType::Assign), target(target) {}
   ::mlir::Value target;
+
+  HWDebugVarDef variable;
 };
 
 struct HWDebugFile : HWDebugScope {
@@ -177,7 +181,6 @@ public:
   }
 
   HWDebugVarDeclareLineInfo *createVarDeclaration(::mlir::Value value) {
-    HWDebugVarDeclareLineInfo *result = nullptr;
     auto loc = value.getLoc();
 
     // need to get the containing module, as well as the line number
@@ -185,13 +188,45 @@ public:
     auto info = std::make_unique<HWDebugVarDeclareLineInfo>(context, value);
     setEntryLocation(*info, loc);
     auto *op = value.getDefiningOp();
-    auto *scope = info->file->getParentScope(op);
-    if (scope) {
-      auto &ptr = scope->scopes.emplace_back(std::move(info));
-      result = reinterpret_cast<HWDebugVarDeclareLineInfo *>(ptr.get());
-    }
-
+    auto var = createVarDef(op);
+    if (var)
+      info->variable = *var;
+    // add to scope
+    auto *result = addToScope(std::move(info), op);
     return result;
+  }
+
+  HWDebugVarAssignLineInfo *createAssign(::mlir::Value value,
+                                         ::mlir::Operation *op) {
+    // only create assign if the target has frontend variable
+    if (!value.getDefiningOp() ||
+        !value.getDefiningOp()->hasAttr("hw.debug.name"))
+      return nullptr;
+
+    auto loc = op->getLoc();
+
+    auto assign = std::make_unique<HWDebugVarAssignLineInfo>(context, value);
+    setEntryLocation(*assign, loc);
+
+    auto *varOp = value.getDefiningOp();
+    auto var = createVarDef(varOp);
+    if (var)
+      assign->variable = *var;
+
+    // add to scope
+    auto *result = addToScope(std::move(assign), op);
+    return result;
+  }
+
+  std::optional<HWDebugVarDef> createVarDef(::mlir::Operation *op) {
+    if (op->hasAttr("hw.debug.name")) {
+      auto frontEndName =
+          op->getAttr("hw.debug.name").cast<mlir::StringAttr>().str();
+      auto rtlName = ::getSymOpName(op).str();
+      HWDebugVarDef var{.name = frontEndName, .value = rtlName, .rtl = true};
+      return var;
+    }
+    return std::nullopt;
   }
 
   HWModuleInfo *createModule(const circt::hw::HWModuleOp &op) {
@@ -202,9 +237,20 @@ public:
 
 private:
   HWDebugContext &context;
+
+  template <typename T>
+  T *addToScope(std::unique_ptr<T> info, ::mlir::Operation *op) {
+    auto *scope = info->file->getParentScope(op);
+    if (scope) {
+      auto &ptr = scope->scopes.emplace_back(std::move(info));
+      return reinterpret_cast<T *>(ptr.get());
+    }
+    return nullptr;
+  }
 };
 
-class DebugStmtVisitor : public circt::hw::StmtVisitor<DebugStmtVisitor>, public circt::sv::Visitor<DebugStmtVisitor, LogicalResult> {
+class DebugStmtVisitor : public circt::hw::StmtVisitor<DebugStmtVisitor>,
+                         public circt::sv::Visitor<DebugStmtVisitor, void> {
 public:
   DebugStmtVisitor(HWDebugBuilder &builder, HWModuleInfo *module)
       : builder(builder), module(module) {}
@@ -217,9 +263,105 @@ public:
     module->instances.emplace(instNameStr, moduleNameStr);
   }
 
+  void visitSV(circt::sv::RegOp op) {
+    // we treat this as a generator variable
+    // only generate if we have annotated in the frontend
+    auto var = builder.createVarDef(op);
+    if (var) {
+      module->variables.emplace_back(*var);
+    }
+  }
+
+  void visitSV(circt::sv::WireOp op) {
+    // noop for now
+    (void)(op);
+  }
+
+  // assignment
+  // we only care about the target of the assignment
+  void visitSV(circt::sv::AssignOp op) {
+    auto target = op.dest();
+    builder.createAssign(target, op);
+  }
+
+  void visitSV(circt::sv::BPAssignOp op) {
+    auto target = op.dest();
+    builder.createAssign(target, op);
+  }
+
+  void visitSV(circt::sv::PAssignOp op) {
+    auto target = op.dest();
+    builder.createAssign(target, op);
+  }
+
+  // noop HW visit functions
+  void visitStmt(circt::hw::ProbeOp) {}
+  void visitStmt(circt::hw::OutputOp) {}
+  void visitStmt(circt::hw::TypedeclOp) {}
+
+  void visitStmt(circt::hw::TypeScopeOp op) { visitBlock(*op->getBlock()); }
+
+  // noop SV visit functions
+  void visitSV(circt::sv::ReadInOutOp) {}
+  void visitSV(circt::sv::ArrayIndexInOutOp) {}
+  void visitSV(circt::sv::VerbatimExprOp) {}
+  void visitSV(circt::sv::VerbatimExprSEOp) {}
+  void visitSV(circt::sv::IndexedPartSelectInOutOp) {}
+  void visitSV(circt::sv::IndexedPartSelectOp) {}
+  void visitSV(circt::sv::StructFieldInOutOp) {}
+  void visitSV(circt::sv::ConstantXOp) {}
+  void visitSV(circt::sv::ConstantZOp) {}
+  void visitSV(circt::sv::LocalParamOp) {}
+  void visitSV(circt::sv::XMROp) {}
+  void visitSV(circt::sv::IfDefOp) {}
+  void visitSV(circt::sv::IfDefProceduralOp) {}
+  void visitSV(circt::sv::AlwaysOp) {}
+  void visitSV(circt::sv::AlwaysCombOp) {}
+  void visitSV(circt::sv::AlwaysFFOp) {}
+  void visitSV(circt::sv::InitialOp) {}
+  void visitSV(circt::sv::CaseZOp) {}
+  void visitSV(circt::sv::ForceOp) {}
+  void visitSV(circt::sv::ReleaseOp) {}
+  void visitSV(circt::sv::AliasOp) {}
+  void visitSV(circt::sv::FWriteOp) {}
+  void visitSV(circt::sv::VerbatimOp) {}
+  void visitSV(circt::sv::InterfaceOp) {}
+  void visitSV(circt::sv::InterfaceSignalOp) {}
+  void visitSV(circt::sv::InterfaceModportOp) {}
+  void visitSV(circt::sv::InterfaceInstanceOp) {}
+  void visitSV(circt::sv::GetModportOp) {}
+  void visitSV(circt::sv::AssignInterfaceSignalOp) {}
+  void visitSV(circt::sv::ReadInterfaceSignalOp) {}
+  void visitSV(circt::sv::AssertOp) {}
+  void visitSV(circt::sv::AssumeOp) {}
+  void visitSV(circt::sv::CoverOp) {}
+  void visitSV(circt::sv::AssertConcurrentOp) {}
+  void visitSV(circt::sv::AssumeConcurrentOp) {}
+  void visitSV(circt::sv::CoverConcurrentOp) {}
+  void visitSV(circt::sv::BindOp) {}
+  void visitSV(circt::sv::StopOp) {}
+  void visitSV(circt::sv::FinishOp) {}
+  void visitSV(circt::sv::ExitOp) {}
+  void visitSV(circt::sv::FatalOp) {}
+  void visitSV(circt::sv::ErrorOp) {}
+  void visitSV(circt::sv::WarningOp) {}
+  void visitSV(circt::sv::InfoOp) {}
+  void visitSV(circt::sv::IfOp) {}
+
+  void dispatch(mlir::Operation *op) {
+    dispatchStmtVisitor(op);
+    dispatchSVVisitor(op);
+  }
+
 private:
   HWDebugBuilder &builder;
   HWModuleInfo *module;
+
+  void visitBlock(mlir::Block &block) {
+    for (auto &op : block) {
+      dispatch(&op);
+    }
+  }
 };
 
 void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
@@ -231,10 +373,65 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
         [&builder](auto mod) {
           auto *module = builder.createModule(mod);
           DebugStmtVisitor visitor(builder, module);
-          visitor.dispatchStmtVisitor(mod.getOperation());
-          visitor.dispatchSVVisitor(mod.getOperation());
+          visitor.dispatch(mod.getOperation());
         });
   }
+}
+
+struct ExportDebugTablePass : public ::mlir::OperationPass<mlir::ModuleOp> {
+  ExportDebugTablePass(std::string filename)
+      : ::mlir::OperationPass<mlir::ModuleOp>(
+            ::mlir::TypeID::get<ExportDebugTablePass>()),
+        filename(filename) {}
+  ExportDebugTablePass(const ExportDebugTablePass &other)
+      : ::mlir::OperationPass<mlir::ModuleOp>(other), filename(other.filename) {
+  }
+
+  void runOnOperation() override { exportDebugTable(getOperation(), filename); }
+
+  /// Returns the command-line argument attached to this pass.
+  static constexpr ::llvm::StringLiteral getArgumentName() {
+    return ::llvm::StringLiteral("export-hgdb");
+  }
+  ::llvm::StringRef getArgument() const override { return "export-hgdb"; }
+
+  ::llvm::StringRef getDescription() const override {
+    return "Generate symbol table for HGDB";
+  }
+
+  /// Returns the derived pass name.
+  static constexpr ::llvm::StringLiteral getPassName() {
+    return ::llvm::StringLiteral("ExportHGDB");
+  }
+  ::llvm::StringRef getName() const override { return "ExportHGDB"; }
+
+  /// Support isa/dyn_cast functionality for the derived pass class.
+  static bool classof(const ::mlir::Pass *pass) {
+    return pass->getTypeID() == ::mlir::TypeID::get<ExportDebugTablePass>();
+  }
+
+  /// A clone method to create a copy of this pass.
+  std::unique_ptr<::mlir::Pass> clonePass() const override {
+    return std::make_unique<ExportDebugTablePass>(
+        *static_cast<const ExportDebugTablePass *>(this));
+  }
+
+  /// Return the dialect that must be loaded in the context before this pass.
+  void getDependentDialects(::mlir::DialectRegistry &registry) const override {
+
+    registry.insert<circt::sv::SVDialect>();
+
+    registry.insert<circt::comb::CombDialect>();
+
+    registry.insert<circt::hw::HWDialect>();
+  }
+
+private:
+  std::string filename;
+};
+
+std::unique_ptr<mlir::Pass> createExportHGDBPass(std::string filename) {
+  return std::make_unique<ExportDebugTablePass>(std::move(filename));
 }
 
 } // namespace circt::debug
