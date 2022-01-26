@@ -70,8 +70,6 @@ public:
   std::vector<HWDebugVarDef> variables;
   std::map<std::string, std::string> instances;
 
-  HWDebugFile *file = nullptr;
-
   explicit HWModuleInfo(HWDebugContext &context) : HWDebugScope(context) {}
 };
 
@@ -158,18 +156,16 @@ private:
 };
 
 void setEntryLocation(HWDebugScope &scope, const mlir::Location &location) {
-  if (location.isa<::mlir::FileLineColLoc>()) {
-    // need to get the containing module, as well as the line number
-    // information
-    auto const fileLoc = location.cast<::mlir::FileLineColLoc>();
-    auto const filename = fileLoc.getFilename();
-    auto const line = fileLoc.getLine();
-    auto const column = fileLoc.getColumn();
+  // need to get the containing module, as well as the line number
+  // information
+  auto const fileLoc = location.cast<::mlir::FileLineColLoc>();
+  auto const filename = fileLoc.getFilename();
+  auto const line = fileLoc.getLine();
+  auto const column = fileLoc.getColumn();
 
-    scope.file = scope.context.createFile(filename.str());
-    scope.line = line;
-    scope.column = column;
-  }
+  scope.file = scope.context.createFile(filename.str());
+  scope.line = line;
+  scope.column = column;
 }
 
 class HWDebugBuilder {
@@ -232,7 +228,11 @@ public:
   HWModuleInfo *createModule(const circt::hw::HWModuleOp &op) {
     auto info = std::make_unique<HWModuleInfo>(context);
     setEntryLocation(*info, op->getLoc());
-    return info->file->addModule(std::move(info), op);
+    if (info->file) {
+      auto *ptr = info.get();
+      return ptr->file->addModule(std::move(info), op);
+    }
+    return nullptr;
   }
 
 private:
@@ -347,6 +347,12 @@ public:
   void visitSV(circt::sv::WarningOp) {}
   void visitSV(circt::sv::InfoOp) {}
   void visitSV(circt::sv::IfOp) {}
+
+  // ignore invalid stuff
+  void visitUnhandledStmt(Operation *) {}
+  void visitInvalidStmt(Operation *) {}
+  void visitUnhandledSV(Operation *) {}
+  void visitInvalidSV(Operation *) {}
 
   void dispatch(mlir::Operation *op) {
     dispatchStmtVisitor(op);

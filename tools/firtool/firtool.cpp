@@ -24,6 +24,7 @@
 #include "circt/Dialect/SV/SVDialect.h"
 #include "circt/Dialect/SV/SVPasses.h"
 #include "circt/Support/LoweringOptions.h"
+#include "circt/Debug/HWDebug.h"
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -209,6 +210,11 @@ static cl::opt<bool>
     inferMemReadWrite("infer-rw",
                       cl::desc("enable infer read write ports for memory"),
                       cl::init(true));
+
+// generate hgdb symbol table
+static cl::opt<std::string>
+    hgdbDebugFile("hgdb",
+                   cl::desc("file name for hgdb debugger file"), cl::init(""));
 
 enum OutputFormatKind {
   OutputParseOnly,
@@ -477,6 +483,11 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
     // pick up any changes that verilog emission made.
     if (exportModuleHierarchy)
       pm.addPass(sv::createHWExportModuleHierarchyPass(outputFilename));
+
+    // If specified, output HGDB debug table as well
+    if (!hgdbDebugFile.empty()) {
+      pm.addPass(circt::debug::createExportHGDBPass(hgdbDebugFile));
+    }
   }
 
   // Load the emitter options from the command line. Command line options if
