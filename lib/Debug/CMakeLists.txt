@@ -1,4 +1,4 @@
-add_circt_library(CIRCTDebug
+add_circt_translation_library(CIRCTDebug
   HWDebug.cpp
 
   ADDITIONAL_HEADER_DIRS

@@ -1,37 +1,47 @@
+#define GET_OP_CLASSES
+
 #include <map>
 #include <memory>
 #include <unordered_map>
 #include <vector>
 
-#include "circt/Dialect/HW/HW.h.inc"
-#include "mlir/IR/BuiltinAttributes.h"
+#include "circt/Dialect/HW/HWOps.h"
 #include "mlir/IR/Value.h"
 
 namespace circt::debug {
 
-class HWDebugFile;
+struct HWDebugFile;
+struct HWDebugScope;
+class HWDebugContext;
+
+void setEntryLocation(HWDebugScope &scope, const mlir::Location &location);
 
 struct HWDebugScope {
 public:
-  HWDebugScope() = default;
+  explicit HWDebugScope(HWDebugContext &context) : context(context) {}
 
   std::vector<std::unique_ptr<HWDebugScope>> scopes;
 
-  HWDebugFile *file = nullptr;
+  uint32_t line = 0;
+  uint32_t column = 0;
+
   HWDebugScope *parent = nullptr;
+  HWDebugFile *file = nullptr;
+
+  HWDebugContext &context;
 };
 
 struct HWDebugLineInfo : HWDebugScope {
   enum class LineType { None, Assign, Declare };
 
-  uint32_t line;
-  uint32_t column = 0;
   std::string condition;
 
   LineType type;
 
-  HWDebugLineInfo() : type(LineType::None) {}
-  HWDebugLineInfo(LineType type) : type(type) {}
+  explicit HWDebugLineInfo(HWDebugContext &context)
+      : HWDebugScope(context), type(LineType::None) {}
+  HWDebugLineInfo(HWDebugContext &context, LineType type)
+      : HWDebugScope(context), type(type) {}
 };
 
 struct HWVarDef {
@@ -48,48 +58,74 @@ public:
 
   std::vector<HWVarDef> variables;
   std::map<std::string, std::string> instances;
+
+  HWDebugFile *file = nullptr;
+
+  explicit HWModuleInfo(HWDebugContext &context) : HWDebugScope(context) {}
 };
 
 struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
-  HWDebugVarDeclareLineInfo(::mlir::Value value)
-      : HWDebugLineInfo(LineType::Declare), value(value) {}
+  HWDebugVarDeclareLineInfo(HWDebugContext &context, ::mlir::Value value)
+      : HWDebugLineInfo(context, LineType::Declare), value(value) {}
 
   ::mlir::Value value;
 };
 
 struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
   // This also encodes mapping information
-  HWDebugVarAssignLineInfo(::mlir::Value target) : target(target) {}
+  HWDebugVarAssignLineInfo(HWDebugContext &context, ::mlir::Value target)
+      : HWDebugLineInfo(context, LineType::Assign), target(target) {}
   ::mlir::Value target;
 };
 
-class HWDebugFile : HWDebugScope {
+struct HWDebugFile : HWDebugScope {
 public:
-  HWDebugFile(const std::string &filename) : filename(filename) {}
+  HWDebugFile(HWDebugContext &context, const std::string &filename)
+      : HWDebugScope(context), filename(filename) {}
 
   void addModule(std::unique_ptr<HWModuleInfo> module,
                  circt::hw::HWModuleOp op) {
-    moduleDefs.emplace_back(std::move(module));
+    auto const *opPtr = op.getOperation();
+    scopeMappings.emplace(opPtr, std::move(module));
   }
 
+  // NOLINTNEXTLINE
   HWDebugScope *getParentScope(::mlir::Operation *op) {
-    (void)(op);
-    return nullptr;
+    if (!op)
+      return nullptr;
+    auto *parentOp = op->getParentOp();
+
+    if (scopeMappings.find(parentOp) == scopeMappings.end()) {
+      // need to create a scope entry for that, with type of None
+      // then we need to create all the scopes up to the module
+      auto scope = getNormalScope(parentOp);
+      scopeMappings.emplace(parentOp, std::move(scope));
+      (void)getParentScope(parentOp);
+    }
+
+    auto &ptr = scopeMappings.at(parentOp);
+
+    return ptr.get();
   }
 
 private:
   std::string filename;
-  std::vector<std::unique_ptr<HWModuleInfo>> moduleDefs;
   // scope mapping
   std::unordered_map<const ::mlir::Operation *, std::unique_ptr<HWDebugScope>>
       scopeMappings;
+
+  std::unique_ptr<HWDebugScope> getNormalScope(::mlir::Operation *op) {
+    auto ptr = std::make_unique<HWDebugScope>(context);
+    setEntryLocation(*ptr, op->getLoc());
+    return std::move(ptr);
+  }
 };
 
 class HWDebugContext {
 public:
   HWDebugFile *createFile(const std::string &filename) {
     if (files.find(filename) == files.end()) {
-      files.emplace(filename, std::make_unique<HWDebugFile>(filename));
+      files.emplace(filename, std::make_unique<HWDebugFile>(*this, filename));
     }
     return files.at(filename).get();
   }
@@ -105,6 +141,21 @@ private:
   std::unordered_map<std::string, std::unique_ptr<HWDebugFile>> files;
 };
 
+void setEntryLocation(HWDebugScope &scope, const mlir::Location &location) {
+  if (location.isa<::mlir::FileLineColLoc>()) {
+    // need to get the containing module, as well as the line number
+    // information
+    auto const fileLoc = location.cast<::mlir::FileLineColLoc>();
+    auto const filename = fileLoc.getFilename();
+    auto const line = fileLoc.getLine();
+    auto const column = fileLoc.getColumn();
+
+    scope.file = scope.context.createFile(filename.str());
+    scope.line = line;
+    scope.column = column;
+  }
+}
+
 class HWDebugBuilder {
 public:
   HWDebugBuilder(HWDebugContext *context) : context(context) {}
@@ -116,25 +167,18 @@ public:
   HWDebugVarDeclareLineInfo *createVarDeclaration(::mlir::Value value) {
     HWDebugVarDeclareLineInfo *result = nullptr;
     auto loc = value.getLoc();
-    if (loc.isa<::mlir::FileLineColLoc>()) {
-      // need to get the containing module, as well as the line number
-      // information
-      auto const fileLoc = loc.cast<::mlir::FileLineColLoc>();
-      auto const fileName = fileLoc.getFilename();
-      auto const line = fileLoc.getLine();
-      auto const column = fileLoc.getColumn();
 
-      auto info = std::make_unique<HWDebugVarDeclareLineInfo>(value);
-      info->file = context->createFile(fileName.str());
-      info->line = line;
-      info->column = column;
-      auto *op = value.getDefiningOp();
-      auto *scope = info->file->getParentScope(op);
-      if (scope) {
-        auto &ptr = scope->scopes.emplace_back(std::move(info));
-        result = reinterpret_cast<HWDebugVarDeclareLineInfo *>(ptr.get());
-      }
+    // need to get the containing module, as well as the line number
+    // information
+    auto info = std::make_unique<HWDebugVarDeclareLineInfo>(*context, value);
+    setEntryLocation(*info, loc);
+    auto *op = value.getDefiningOp();
+    auto *scope = info->file->getParentScope(op);
+    if (scope) {
+      auto &ptr = scope->scopes.emplace_back(std::move(info));
+      result = reinterpret_cast<HWDebugVarDeclareLineInfo *>(ptr.get());
     }
+
     return result;
   }
 
