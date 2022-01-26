@@ -6,7 +6,17 @@
 #include <vector>
 
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/HW/HWVisitors.h"
+#include "circt/Dialect/SV/SVVisitors.h"
 #include "mlir/IR/Value.h"
+
+namespace {
+mlir::StringRef getSymOpName(mlir::Operation *symOp);
+} // end anonymous namespace
+
+namespace circt::hw {
+mlir::StringAttr getVerilogModuleNameAttr(mlir::Operation *module);
+} // namespace circt::hw
 
 namespace circt::debug {
 
@@ -83,10 +93,12 @@ public:
   HWDebugFile(HWDebugContext &context, const std::string &filename)
       : HWDebugScope(context), filename(filename) {}
 
-  void addModule(std::unique_ptr<HWModuleInfo> module,
-                 circt::hw::HWModuleOp op) {
+  HWModuleInfo *addModule(std::unique_ptr<HWModuleInfo> module,
+                          circt::hw::HWModuleOp op) {
     auto const *opPtr = op.getOperation();
-    scopeMappings.emplace(opPtr, std::move(module));
+    auto const &iter = scopeMappings.emplace(opPtr, std::move(module));
+    auto *scope = iter.first->second.get();
+    return reinterpret_cast<HWModuleInfo *>(scope);
   }
 
   // NOLINTNEXTLINE
@@ -158,10 +170,10 @@ void setEntryLocation(HWDebugScope &scope, const mlir::Location &location) {
 
 class HWDebugBuilder {
 public:
-  HWDebugBuilder(HWDebugContext *context) : context(context) {}
+  HWDebugBuilder(HWDebugContext &context) : context(context) {}
 
   HWDebugFile *createFile(const std::string &filename) {
-    return context->createFile(filename);
+    return context.createFile(filename);
   }
 
   HWDebugVarDeclareLineInfo *createVarDeclaration(::mlir::Value value) {
@@ -170,7 +182,7 @@ public:
 
     // need to get the containing module, as well as the line number
     // information
-    auto info = std::make_unique<HWDebugVarDeclareLineInfo>(*context, value);
+    auto info = std::make_unique<HWDebugVarDeclareLineInfo>(context, value);
     setEntryLocation(*info, loc);
     auto *op = value.getDefiningOp();
     auto *scope = info->file->getParentScope(op);
@@ -183,15 +195,46 @@ public:
   }
 
   HWModuleInfo *createModule(const circt::hw::HWModuleOp &op) {
-    auto info = std::make_unique<HWModuleInfo>(*context);
+    auto info = std::make_unique<HWModuleInfo>(context);
     setEntryLocation(*info, op->getLoc());
-    info->file->addModule(std::move(info), op);
-
-    // need to create generator instances and variables
+    return info->file->addModule(std::move(info), op);
   }
 
 private:
-  HWDebugContext *context;
+  HWDebugContext &context;
 };
+
+class DebugStmtVisitor : public circt::hw::StmtVisitor<DebugStmtVisitor>, public circt::sv::Visitor<DebugStmtVisitor, LogicalResult> {
+public:
+  DebugStmtVisitor(HWDebugBuilder &builder, HWModuleInfo *module)
+      : builder(builder), module(module) {}
+
+  void visitStmt(circt::hw::InstanceOp op) {
+    auto instNameRef = ::getSymOpName(op);
+    auto instNameStr = std::string(instNameRef.begin(), instNameRef.end());
+    // need to find definition names
+    auto moduleNameStr = circt::hw::getVerilogModuleNameAttr(op).str();
+    module->instances.emplace(instNameStr, moduleNameStr);
+  }
+
+private:
+  HWDebugBuilder &builder;
+  HWModuleInfo *module;
+};
+
+void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
+  // collect all the files
+  HWDebugContext context;
+  HWDebugBuilder builder(context);
+  for (auto &op : *moduleOp.getBody()) {
+    mlir::TypeSwitch<mlir::Operation *>(&op).Case<circt::hw::HWModuleOp>(
+        [&builder](auto mod) {
+          auto *module = builder.createModule(mod);
+          DebugStmtVisitor visitor(builder, module);
+          visitor.dispatchStmtVisitor(mod.getOperation());
+          visitor.dispatchSVVisitor(mod.getOperation());
+        });
+  }
+}
 
 } // namespace circt::debug

@@ -10,11 +10,5 @@ add_circt_translation_library(CIRCTDebug
   Core
 
   LINK_LIBS PUBLIC
-  CIRCTComb
-  CIRCTHW
-  CIRCTSupport
-  CIRCTSV
-  MLIRPass
-  MLIRSideEffectInterfaces
-  MLIRTranslation
+  CIRCTExportVerilog
   )
