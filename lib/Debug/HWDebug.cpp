@@ -182,6 +182,14 @@ public:
     return result;
   }
 
+  HWModuleInfo *createModule(const circt::hw::HWModuleOp &op) {
+    auto info = std::make_unique<HWModuleInfo>(*context);
+    setEntryLocation(*info, op->getLoc());
+    info->file->addModule(std::move(info), op);
+
+    // need to create generator instances and variables
+  }
+
 private:
   HWDebugContext *context;
 };
