@@ -369,15 +369,17 @@ public:
     dispatchSVVisitor(op);
   }
 
-private:
-  HWDebugBuilder &builder;
-  HWModuleInfo *module;
-
   void visitBlock(mlir::Block &block) {
     for (auto &op : block) {
       dispatch(&op);
     }
   }
+
+private:
+  HWDebugBuilder &builder;
+  HWModuleInfo *module;
+
+
 };
 
 void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
@@ -386,10 +388,11 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   HWDebugBuilder builder(context);
   for (auto &op : *moduleOp.getBody()) {
     mlir::TypeSwitch<mlir::Operation *>(&op).Case<circt::hw::HWModuleOp>(
-        [&builder](auto mod) {
+        [&builder](circt::hw::HWModuleOp mod) {
           auto *module = builder.createModule(mod);
           DebugStmtVisitor visitor(builder, module);
-          visitor.dispatch(mod.getOperation());
+          auto *body = mod.getBodyBlock();
+          visitor.visitBlock(*body);
         });
   }
 }
