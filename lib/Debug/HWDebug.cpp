@@ -74,18 +74,16 @@ public:
 };
 
 struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
-  HWDebugVarDeclareLineInfo(HWDebugContext &context, ::mlir::Value value)
-      : HWDebugLineInfo(context, LineType::Declare), value(value) {}
+  HWDebugVarDeclareLineInfo(HWDebugContext &context)
+      : HWDebugLineInfo(context, LineType::Declare) {}
 
-  ::mlir::Value value;
   HWDebugVarDef variable;
 };
 
 struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
   // This also encodes mapping information
-  HWDebugVarAssignLineInfo(HWDebugContext &context, ::mlir::Value target)
-      : HWDebugLineInfo(context, LineType::Assign), target(target) {}
-  ::mlir::Value target;
+  HWDebugVarAssignLineInfo(HWDebugContext &context)
+      : HWDebugLineInfo(context, LineType::Assign) {}
 
   HWDebugVarDef variable;
 };
@@ -184,7 +182,7 @@ public:
 
     // need to get the containing module, as well as the line number
     // information
-    auto info = std::make_unique<HWDebugVarDeclareLineInfo>(context, value);
+    auto info = std::make_unique<HWDebugVarDeclareLineInfo>(context);
     setEntryLocation(*info, loc);
     auto *op = value.getDefiningOp();
     info->variable = createVarDef(targetOp);
@@ -202,7 +200,7 @@ public:
 
     auto loc = op->getLoc();
 
-    auto assign = std::make_unique<HWDebugVarAssignLineInfo>(context, value);
+    auto assign = std::make_unique<HWDebugVarAssignLineInfo>(context);
     setEntryLocation(*assign, loc);
 
     assign->variable = createVarDef(targetOp);
@@ -290,16 +288,19 @@ public:
   // assignment
   // we only care about the target of the assignment
   void visitSV(circt::sv::AssignOp op) {
+    if (!hasDebug(op)) return;
     auto target = op.dest();
     builder.createAssign(target, op);
   }
 
   void visitSV(circt::sv::BPAssignOp op) {
+    if (!hasDebug(op)) return;
     auto target = op.dest();
     builder.createAssign(target, op);
   }
 
   void visitSV(circt::sv::PAssignOp op) {
+    if (!hasDebug(op)) return;
     auto target = op.dest();
     builder.createAssign(target, op);
   }

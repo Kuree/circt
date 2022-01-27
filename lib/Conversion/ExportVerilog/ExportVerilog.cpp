@@ -2611,10 +2611,6 @@ LogicalResult StmtEmitter::visitSV(AssignOp op) {
   emitExpression(op.src(), ops);
   os << ';';
   emitLocationInfoAndNewLine(ops);
-  auto hasAttr = op->hasAttr("hw.debug.name");
-  if (hasAttr) {
-    printf("has attr: %d\n", hasAttr);
-  }
   return success();
 }
 

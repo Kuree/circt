@@ -1527,8 +1527,6 @@ void FIRRTLLowering::run() {
     optimizeTemporaryWire(wire);
 }
 
-bool hasRename(sv::WireOp wire) { return wire->hasAttr("hw.debug.name"); }
-
 // Try to optimize out temporary wires introduced during lowering.
 void FIRRTLLowering::optimizeTemporaryWire(sv::WireOp wire) {
   // Wires have inout type, so they'll have connects and read_inout operations
@@ -1557,8 +1555,6 @@ void FIRRTLLowering::optimizeTemporaryWire(sv::WireOp wire) {
   // use-before-def checking to do, so we only handle that for now.
   if (!isa<hw::HWModuleOp>(write->getParentOp()))
     return;
-
-  printf("has rename: %d\n", hasRename(wire));
 
   auto connected = write.src();
 
