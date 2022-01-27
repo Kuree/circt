@@ -178,15 +178,16 @@ public:
 
   HWDebugVarDeclareLineInfo *createVarDeclaration(::mlir::Value value) {
     auto loc = value.getLoc();
+    auto *targetOp = getDebugOp(value, value.getDefiningOp());
+    if (!targetOp)
+      return nullptr;
 
     // need to get the containing module, as well as the line number
     // information
     auto info = std::make_unique<HWDebugVarDeclareLineInfo>(context, value);
     setEntryLocation(*info, loc);
     auto *op = value.getDefiningOp();
-    auto var = createVarDef(op);
-    if (var)
-      info->variable = *var;
+    info->variable = createVarDef(targetOp);
     // add to scope
     auto *result = addToScope(std::move(info), op);
     return result;
@@ -195,8 +196,8 @@ public:
   HWDebugVarAssignLineInfo *createAssign(::mlir::Value value,
                                          ::mlir::Operation *op) {
     // only create assign if the target has frontend variable
-    if (!value.getDefiningOp() ||
-        !value.getDefiningOp()->hasAttr("hw.debug.name"))
+    auto *targetOp = getDebugOp(value, op);
+    if (!targetOp)
       return nullptr;
 
     auto loc = op->getLoc();
@@ -204,25 +205,20 @@ public:
     auto assign = std::make_unique<HWDebugVarAssignLineInfo>(context, value);
     setEntryLocation(*assign, loc);
 
-    auto *varOp = value.getDefiningOp();
-    auto var = createVarDef(varOp);
-    if (var)
-      assign->variable = *var;
+    assign->variable = createVarDef(targetOp);
 
     // add to scope
     auto *result = addToScope(std::move(assign), op);
     return result;
   }
 
-  std::optional<HWDebugVarDef> createVarDef(::mlir::Operation *op) {
-    if (op->hasAttr("hw.debug.name")) {
-      auto frontEndName =
-          op->getAttr("hw.debug.name").cast<mlir::StringAttr>().str();
-      auto rtlName = ::getSymOpName(op).str();
-      HWDebugVarDef var{.name = frontEndName, .value = rtlName, .rtl = true};
-      return var;
-    }
-    return std::nullopt;
+  HWDebugVarDef createVarDef(::mlir::Operation *op) {
+    // the OP has to have this attr. need to check before calling this function
+    auto frontEndName =
+        op->getAttr("hw.debug.name").cast<mlir::StringAttr>().str();
+    auto rtlName = ::getSymOpName(op).str();
+    HWDebugVarDef var{.name = frontEndName, .value = rtlName, .rtl = true};
+    return var;
   }
 
   HWModuleInfo *createModule(const circt::hw::HWModuleOp &op) {
@@ -247,6 +243,17 @@ private:
     }
     return nullptr;
   }
+
+  static mlir::Operation *getDebugOp(mlir::Value value, mlir::Operation *op) {
+    auto *valueOP = value.getDefiningOp();
+    if (valueOP && valueOP->hasAttr("hw.debug.name")) {
+      return valueOP;
+    }
+    if (op && op->hasAttr("hw.debug.name")) {
+      return op;
+    }
+    return nullptr;
+  }
 };
 
 class DebugStmtVisitor : public circt::hw::StmtVisitor<DebugStmtVisitor>,
@@ -259,23 +266,24 @@ public:
     auto instNameRef = ::getSymOpName(op);
     auto instNameStr = std::string(instNameRef.begin(), instNameRef.end());
     // need to find definition names
-    auto moduleNameStr = circt::hw::getVerilogModuleNameAttr(op).str();
+    auto *mod = op.getReferencedModule(nullptr);
+    auto moduleNameStr = circt::hw::getVerilogModuleNameAttr(mod).str();
     module->instances.emplace(instNameStr, moduleNameStr);
   }
 
   void visitSV(circt::sv::RegOp op) {
     // we treat this as a generator variable
     // only generate if we have annotated in the frontend
-    auto var = builder.createVarDef(op);
-    if (var) {
-      module->variables.emplace_back(*var);
+    if (hasDebug(op)) {
+      auto var = builder.createVarDef(op);
+      module->variables.emplace_back(var);
     }
   }
 
   void visitSV(circt::sv::WireOp op) {
-    auto var = builder.createVarDef(op);
-    if (var) {
-      module->variables.emplace_back(*var);
+    if (hasDebug(op)) {
+      auto var = builder.createVarDef(op);
+      module->variables.emplace_back(var);
     }
   }
 
@@ -296,6 +304,14 @@ public:
     builder.createAssign(target, op);
   }
 
+  void visitStmt(circt::hw::OutputOp op) {
+    hw::HWModuleOp parent = op->getParentOfType<hw::HWModuleOp>();
+    for (auto i = 0u; i < parent.getPorts().outputs.size(); i++) {
+      auto operand = op.getOperand(i);
+      builder.createAssign(operand, op);
+    }
+  }
+
   // visit blocks
   void visitSV(circt::sv::AlwaysOp op) { visitBlock(*op.getBodyBlock()); }
 
@@ -312,7 +328,6 @@ public:
 
   // noop HW visit functions
   void visitStmt(circt::hw::ProbeOp) {}
-  void visitStmt(circt::hw::OutputOp) {}
   void visitStmt(circt::hw::TypedeclOp) {}
 
   void visitStmt(circt::hw::TypeScopeOp op) { visitBlock(*op.getBodyBlock()); }
@@ -379,7 +394,9 @@ private:
   HWDebugBuilder &builder;
   HWModuleInfo *module;
 
-
+  bool hasDebug(mlir::Operation *op) {
+    return op && op->hasAttr("hw.debug.name");
+  }
 };
 
 void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
