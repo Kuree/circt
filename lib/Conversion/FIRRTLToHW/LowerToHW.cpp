@@ -2270,6 +2270,7 @@ LogicalResult FIRRTLLowering::visitDecl(NodeOp op) {
     auto wire = builder.create<sv::WireOp>(operand.getType(), name, symName);
     auto assign = builder.create<sv::AssignOp>(wire, operand);
     if (op->hasAttr("hw.debug.name")) {
+      printf("Added debug name to NodeOp\n");
       assign->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
     }
   }
@@ -3266,8 +3267,8 @@ LogicalResult FIRRTLLowering::visitStmt(ConnectOp op) {
 
   auto newAssignOp = builder.create<sv::AssignOp>(destVal, srcVal);
   if (op->hasAttr("hw.debug.name")) {
-    newAssignOp.getOperation()->setAttr("hw.debug.name",
-                                        op->getAttr("hw.debug.name"));
+    printf("Added debug name to ConnectOp\n");
+    newAssignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
   }
   return success();
 }

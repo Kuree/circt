@@ -2597,6 +2597,9 @@ void StmtEmitter::emitStatementExpression(Operation *op) {
 }
 
 LogicalResult StmtEmitter::visitSV(AssignOp op) {
+  if (op->hasAttr("hw.debug.name")) {
+    printf("Has debug attribute\n");
+  }
   // prepare assigns wires to instance outputs, but these are logically handled
   // in the port binding list when outputing an instance.
   if (dyn_cast_or_null<InstanceOp>(op.src().getDefiningOp()))
