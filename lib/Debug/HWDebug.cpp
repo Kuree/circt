@@ -273,8 +273,10 @@ public:
   }
 
   void visitSV(circt::sv::WireOp op) {
-    // noop for now
-    (void)(op);
+    auto var = builder.createVarDef(op);
+    if (var) {
+      module->variables.emplace_back(*var);
+    }
   }
 
   // assignment
@@ -294,12 +296,26 @@ public:
     builder.createAssign(target, op);
   }
 
+  // visit blocks
+  void visitSV(circt::sv::AlwaysOp op) { visitBlock(*op.getBodyBlock()); }
+
+  void visitSV(circt::sv::AlwaysCombOp op) { visitBlock(*op.getBodyBlock()); }
+
+  void visitSV(circt::sv::AlwaysFFOp op) {
+    if (op.getResetBlock()) {
+      visitBlock(*op.getResetBlock());
+    }
+    visitBlock(*op.getBodyBlock());
+  }
+
+  void visitSV(circt::sv::InitialOp op) { visitBlock(*op.getBodyBlock()); }
+
   // noop HW visit functions
   void visitStmt(circt::hw::ProbeOp) {}
   void visitStmt(circt::hw::OutputOp) {}
   void visitStmt(circt::hw::TypedeclOp) {}
 
-  void visitStmt(circt::hw::TypeScopeOp op) { visitBlock(*op->getBlock()); }
+  void visitStmt(circt::hw::TypeScopeOp op) { visitBlock(*op.getBodyBlock()); }
 
   // noop SV visit functions
   void visitSV(circt::sv::ReadInOutOp) {}
@@ -315,10 +331,6 @@ public:
   void visitSV(circt::sv::XMROp) {}
   void visitSV(circt::sv::IfDefOp) {}
   void visitSV(circt::sv::IfDefProceduralOp) {}
-  void visitSV(circt::sv::AlwaysOp) {}
-  void visitSV(circt::sv::AlwaysCombOp) {}
-  void visitSV(circt::sv::AlwaysFFOp) {}
-  void visitSV(circt::sv::InitialOp) {}
   void visitSV(circt::sv::CaseZOp) {}
   void visitSV(circt::sv::ForceOp) {}
   void visitSV(circt::sv::ReleaseOp) {}
@@ -349,9 +361,7 @@ public:
   void visitSV(circt::sv::IfOp) {}
 
   // ignore invalid stuff
-  void visitUnhandledStmt(Operation *) {}
   void visitInvalidStmt(Operation *) {}
-  void visitUnhandledSV(Operation *) {}
   void visitInvalidSV(Operation *) {}
 
   void dispatch(mlir::Operation *op) {
