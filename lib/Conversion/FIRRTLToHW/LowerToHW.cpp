@@ -2269,11 +2269,8 @@ LogicalResult FIRRTLLowering::visitDecl(NodeOp op) {
   if (symName) {
     auto wire = builder.create<sv::WireOp>(operand.getType(), name, symName);
     auto assign = builder.create<sv::AssignOp>(wire, operand);
-    bool hasAttr =
-        op.getOperation() && op.getOperation()->hasAttr("hw.debug.name");
-    if (hasAttr) {
-      assign.getOperation()->setAttr(
-          "hw.debug.name", op.getOperation()->getAttr("hw.debug.name"));
+    if (op->hasAttr("hw.debug.name")) {
+      assign->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
     }
   }
 
@@ -2483,7 +2480,10 @@ LogicalResult FIRRTLLowering::visitDecl(RegResetOp op) {
   (void)setLowering(op, regResult);
 
   auto resetFn = [&]() {
-    builder.create<sv::PAssignOp>(regResult, resetValue);
+    auto assignOP = builder.create<sv::PAssignOp>(regResult, resetValue);
+    if (op->hasAttr("hw.debug.name")) {
+      assignOP->setAttr("hw.debug.name", regResult->getAttr("hw.debug.name"));
+    }
   };
 
   if (op.resetSignal().getType().isa<AsyncResetType>()) {
@@ -3230,8 +3230,13 @@ LogicalResult FIRRTLLowering::visitStmt(ConnectOp op) {
     if (!clockVal)
       return failure();
 
-    addToAlwaysBlock(clockVal,
-                     [&]() { builder.create<sv::PAssignOp>(destVal, srcVal); });
+    addToAlwaysBlock(clockVal, [&]() {
+      auto assignOp = builder.create<sv::PAssignOp>(destVal, srcVal);
+      if (op->hasAttr("hw.debug.name")) {
+        assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+      }
+      return assignOp;
+    });
     return success();
   }
 
@@ -3243,12 +3248,19 @@ LogicalResult FIRRTLLowering::visitStmt(ConnectOp op) {
     if (!clockVal || !resetSignal)
       return failure();
 
-    addToAlwaysBlock(sv::EventControl::AtPosEdge, clockVal,
-                     regResetOp.resetSignal().getType().isa<AsyncResetType>()
-                         ? ::ResetType::AsyncReset
-                         : ::ResetType::SyncReset,
-                     sv::EventControl::AtPosEdge, resetSignal,
-                     [&]() { builder.create<sv::PAssignOp>(destVal, srcVal); });
+    addToAlwaysBlock(
+        sv::EventControl::AtPosEdge, clockVal,
+        regResetOp.resetSignal().getType().isa<AsyncResetType>()
+            ? ::ResetType::AsyncReset
+            : ::ResetType::SyncReset,
+        sv::EventControl::AtPosEdge, resetSignal, [&]() {
+          auto assignOp = builder.create<sv::PAssignOp>(destVal, srcVal);
+          if (op->hasAttr("hw.debug.name")) {
+            assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+          }
+
+          return assignOp;
+        });
     return success();
   }
 
@@ -3287,8 +3299,13 @@ LogicalResult FIRRTLLowering::visitStmt(PartialConnectOp op) {
     if (!clockVal)
       return failure();
 
-    addToAlwaysBlock(clockVal,
-                     [&]() { builder.create<sv::PAssignOp>(destVal, srcVal); });
+    addToAlwaysBlock(clockVal, [&]() {
+      auto assignOp = builder.create<sv::PAssignOp>(destVal, srcVal);
+      if (op->hasAttr("hw.debug.name")) {
+        assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+      }
+      return assignOp;
+    });
     return success();
   }
 
@@ -3303,9 +3320,15 @@ LogicalResult FIRRTLLowering::visitStmt(PartialConnectOp op) {
     auto resetStyle = regResetOp.resetSignal().getType().isa<AsyncResetType>()
                           ? ::ResetType::AsyncReset
                           : ::ResetType::SyncReset;
-    addToAlwaysBlock(sv::EventControl::AtPosEdge, clockVal, resetStyle,
-                     sv::EventControl::AtPosEdge, resetSignal,
-                     [&]() { builder.create<sv::PAssignOp>(destVal, srcVal); });
+    addToAlwaysBlock(
+        sv::EventControl::AtPosEdge, clockVal, resetStyle,
+        sv::EventControl::AtPosEdge, resetSignal, [&]() {
+          auto assignOp = builder.create<sv::PAssignOp>(destVal, srcVal);
+          if (op->hasAttr("hw.debug.name")) {
+            assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+          }
+          return assignOp;
+        });
     return success();
   }
 
@@ -3334,7 +3357,13 @@ LogicalResult FIRRTLLowering::visitStmt(PartialConnectOp op) {
                       srcVectorType.getElementType());
             }
           })
-          .Case<IntType>([&](auto) { builder.create<sv::AssignOp>(dest, src); })
+          .Case<IntType>([&](auto) {
+            auto assignOp = builder.create<sv::AssignOp>(dest, src);
+            if (op->hasAttr("hw.debug.name")) {
+              assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+            }
+            return assignOp;
+          })
           .Default([&](auto) { llvm_unreachable("must fail before"); });
     };
     recurse(destVal, srcVal, destType, op.src().getType());

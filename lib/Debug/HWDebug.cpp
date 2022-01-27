@@ -396,7 +396,8 @@ private:
   HWModuleInfo *module;
 
   bool hasDebug(mlir::Operation *op) {
-    return op && op->hasAttr("hw.debug.name");
+    auto r = op && op->hasAttr("hw.debug.name");
+    return r;
   }
 };
 
