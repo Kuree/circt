@@ -469,7 +469,16 @@ bool TypeLoweringVisitor::lowerProducer(
   auto baseNameLen = loweredName.size();
   auto oldAnno = op->getAttr("annotations").dyn_cast_or_null<ArrayAttr>();
 
-  for (auto field : fieldTypes) {
+  bool isArray = srcType.isa<FVectorType>();
+
+  for (auto fieldIdx = 0u; fieldIdx < fieldTypes.size(); fieldIdx++) {
+    auto field = fieldTypes[fieldIdx];
+    // if it's an array, need to add array idx
+    SmallString<16> targetName = baseName;
+    if (isArray) {
+      targetName.append(".");
+      targetName.append(std::to_string(fieldIdx));
+    }
     if (!loweredName.empty()) {
       loweredName.resize(baseNameLen);
       loweredName += field.suffix;
@@ -487,7 +496,7 @@ bool TypeLoweringVisitor::lowerProducer(
     if (hasDontTouch)
       newOp->setAttr("inner_sym", StringAttr::get(context, loweredName));
 
-    newOp->setAttr("hw.debug.name", StringAttr::get(context, baseName));
+    newOp->setAttr("hw.debug.name", StringAttr::get(context, targetName));
     lowered.push_back(newOp->getResult(0));
   }
 
