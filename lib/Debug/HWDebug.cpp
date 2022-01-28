@@ -425,7 +425,9 @@ struct ExportDebugTablePass : public ::mlir::OperationPass<mlir::ModuleOp> {
       : ::mlir::OperationPass<mlir::ModuleOp>(other), filename(other.filename) {
   }
 
-  void runOnOperation() override { exportDebugTable(getOperation(), filename); }
+  void runOnOperation() override {
+    //exportDebugTable(getOperation(), filename);
+  }
 
   /// Returns the command-line argument attached to this pass.
   static constexpr ::llvm::StringLiteral getArgumentName() {
