@@ -1059,7 +1059,6 @@ bool TypeLoweringVisitor::visitDecl(FExtModuleOp extModule) {
   extModule->setAttrs(newModuleAttrs);
 
   AnnotationSet set(extModule);
-  printf("set size: %ld\n", set.size());
   return false;
 }
 
@@ -1142,7 +1141,13 @@ bool TypeLoweringVisitor::visitDecl(WireOp op) {
                    ArrayAttr attrs) -> Operation * {
     return builder->create<WireOp>(field.type, name, attrs, StringAttr{});
   };
-  return lowerProducer(op, clone);
+  auto handled = lowerProducer(op, clone);
+  if (!handled) {
+    if (auto nameAttr = op->getAttr("name")) {
+      op->setAttr("hw.debug.name", nameAttr);
+    }
+  }
+  return handled;
 }
 
 /// Lower a reg op with a bundle to multiple non-bundled regs.
@@ -1164,7 +1169,14 @@ bool TypeLoweringVisitor::visitDecl(RegResetOp op) {
                                        op.resetSignal(), resetVal, name, attrs,
                                        StringAttr{});
   };
-  return lowerProducer(op, clone);
+  auto handled = lowerProducer(op, clone);
+  if (!handled) {
+    // not a bundle type. op not changed
+    if (auto name = op->getAttr("name")) {
+      op->setAttr("hw.debug.name", name);
+    }
+  }
+  return handled;
 }
 
 /// Lower a wire op with a bundle to multiple non-bundled wires.

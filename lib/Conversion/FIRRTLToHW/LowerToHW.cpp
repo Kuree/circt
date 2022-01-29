@@ -2495,8 +2495,8 @@ LogicalResult FIRRTLLowering::visitDecl(RegResetOp op) {
 
   auto resetFn = [&]() {
     auto assignOP = builder.create<sv::PAssignOp>(regResult, resetValue);
-    if (op->hasAttr("hw.debug.name")) {
-      assignOP->setAttr("hw.debug.name", regResult->getAttr("hw.debug.name"));
+    if (auto debugAttr = op->getAttr("hw.debug.name")) {
+      assignOP->setAttr("hw.debug.name", debugAttr);
     }
   };
 
