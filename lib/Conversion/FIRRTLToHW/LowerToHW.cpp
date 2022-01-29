@@ -2491,6 +2491,8 @@ LogicalResult FIRRTLLowering::visitDecl(RegResetOp op) {
     symName = op.nameAttr();
   auto regResult =
       builder.create<sv::RegOp>(resultType, op.nameAttr(), symName);
+  if (auto debugAttr = op->getAttr("hw.debug.name"))
+    regResult->setAttr("hw.debug.name", debugAttr);
   (void)setLowering(op, regResult);
 
   auto resetFn = [&]() {
@@ -3279,8 +3281,12 @@ LogicalResult FIRRTLLowering::visitStmt(ConnectOp op) {
   }
 
   auto newAssignOp = builder.create<sv::AssignOp>(destVal, srcVal);
-  if (op->hasAttr("hw.debug.name")) {
-    newAssignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+  if (auto debugAttr = op->getAttr("hw.debug.name")) {
+    newAssignOp->setAttr("hw.debug.name", debugAttr);
+  } else if (auto *destOp = op.dest().getDefiningOp()) {
+    if ((debugAttr = destOp->getAttr("hw.debug.name"))) {
+      newAssignOp->setAttr("hw.debug.name", debugAttr);
+    }
   }
   return success();
 }
