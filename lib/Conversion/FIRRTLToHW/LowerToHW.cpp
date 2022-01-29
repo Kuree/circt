@@ -1534,6 +1534,11 @@ void FIRRTLLowering::optimizeTemporaryWire(sv::WireOp wire) {
   SmallVector<sv::ReadInOutOp> reads;
   sv::AssignOp write;
 
+  // if the wire has debug attributes, skip it
+  if (wire->hasAttr("hw.debug.name")) {
+    return;
+  }
+
   for (auto *user : wire->getUsers()) {
     if (auto read = dyn_cast<sv::ReadInOutOp>(user)) {
       reads.push_back(read);
@@ -1913,6 +1918,10 @@ template <typename ResultOpType, typename... CtorArgTypes>
 LogicalResult FIRRTLLowering::setLoweringTo(Operation *orig,
                                             CtorArgTypes... args) {
   auto result = builder.createOrFold<ResultOpType>(args...);
+  if (auto debugAttr = orig->getAttr("hw.debug.name")) {
+    auto *op = result.getDefiningOp();
+    op->setAttr("hw.debug.name", debugAttr);
+  }
   return setPossiblyFoldedLowering(orig->getResult(0), result);
 }
 
@@ -1949,6 +1958,11 @@ Value FIRRTLLowering::getReadInOutOp(Value v) {
   }
 
   result = builder.createOrFold<sv::ReadInOutOp>(v);
+  if (auto vOp = v.getDefiningOp()) {
+    if (auto debugAttr = vOp->getAttr("hw.debug.name")) {
+      result.getDefiningOp()->setAttr("hw.debug.name", debugAttr);
+    }
+  }
   builder.restoreInsertionPoint(oldIP);
   return result;
 }
