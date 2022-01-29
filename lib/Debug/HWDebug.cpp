@@ -106,6 +106,7 @@ public:
     if (!op)
       return nullptr;
     auto *parentOp = op->getParentOp();
+    if (!parentOp) return nullptr;
 
     if (scopeMappings.find(parentOp) == scopeMappings.end()) {
       // need to create a scope entry for that, with type of None
@@ -426,7 +427,8 @@ struct ExportDebugTablePass : public ::mlir::OperationPass<mlir::ModuleOp> {
   }
 
   void runOnOperation() override {
-    //exportDebugTable(getOperation(), filename);
+    exportDebugTable(getOperation(), filename);
+    markAllAnalysesPreserved();
   }
 
   /// Returns the command-line argument attached to this pass.
