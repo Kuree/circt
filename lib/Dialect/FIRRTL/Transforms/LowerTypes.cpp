@@ -648,10 +648,31 @@ bool TypeLoweringVisitor::visitStmt(ConnectOp op) {
   if (!peelType(op.dest().getType(), fields,
                 /* allowedToPreserveAggregate */ false)) {
     // store the name as well
-    auto *dstOp = op.dest().getDefiningOp();
-    if (dstOp && dstOp->hasAttr("name")) {
-      auto nameAttr = dstOp->getAttr("name");
-      op->setAttr("hw.debug.name", nameAttr);
+    auto dest = op.dest();
+    if (auto *destOp = dest.getDefiningOp()) {
+      if (auto nameAttr = destOp->getAttr("name")) {
+        if (auto instOp = dest.getDefiningOp<InstanceOp>()) {
+          // this is an instance connection, need to treat differently
+          // since the defining OP would be the instance and therefore the
+          // naming would be wrong
+          auto const &results = instOp.results();
+          for (auto const &res : results) {
+            if (res == dest) {
+              // found this result. need to obtain the name. a little hacky,
+              // but it's the best way I know of
+              auto resultNo = res.getResultNumber();
+              auto portName = instOp.getPortName(resultNo);
+              auto nameStr = nameAttr.cast<mlir::StringAttr>().str() + "_" +
+                             portName.str();
+              op->setAttr("hw.debug.name",
+                          mlir::StringAttr::get(nameStr, context));
+              break;
+            }
+          }
+        } else {
+          op->setAttr("hw.debug.name", nameAttr);
+        }
+      }
     }
 
     return false;
