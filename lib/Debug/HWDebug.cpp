@@ -12,6 +12,7 @@
 #include "circt/Dialect/SV/SVVisitors.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/Support/JSON.h"
 
 mlir::StringRef getSymOpName(mlir::Operation *symOp);
 
@@ -40,6 +41,36 @@ public:
   HWDebugFile *file = nullptr;
 
   HWDebugContext &context;
+
+  // NOLINTNEXTLINE
+  [[nodiscard]] virtual llvm::json::Value toJSON() const {
+    // by default, it's block scope
+    auto res = getScopeJSON(true);
+    res["type"] = "block";
+    return res;
+  }
+
+protected:
+  // NOLINTNEXTLINE
+  [[nodiscard]] llvm::json::Object getScopeJSON(bool includeScope) const {
+    llvm::json::Object res{{"line", line}};
+    if (column > 0) {
+      res["column"] = column;
+    }
+    if (includeScope) {
+      setScope(res);
+    }
+    return res;
+  }
+
+  void setScope(llvm::json::Object &obj) const {
+    llvm::json::Array array;
+    array.reserve(scopes.size());
+    for (auto const &scope : scopes) {
+      array.emplace_back(std::move(scope->toJSON()));
+    }
+    obj["scopes"] = std::move(array);
+  }
 };
 
 struct HWDebugLineInfo : HWDebugScope {
@@ -53,6 +84,31 @@ struct HWDebugLineInfo : HWDebugScope {
       : HWDebugScope(context), type(LineType::None) {}
   HWDebugLineInfo(HWDebugContext &context, LineType type)
       : HWDebugScope(context), type(type) {}
+
+  [[nodiscard]] llvm::json::Value toJSON() const override {
+    auto res = getScopeJSON(false);
+    std::string typeStr;
+    switch (type) {
+    case LineType::None:
+      typeStr = "none";
+      break;
+    case LineType::Assign:
+      typeStr = "assign";
+      break;
+    case LineType::Declare:
+      typeStr = "decl";
+      break;
+    default:
+      llvm_unreachable("unknown line type");
+    }
+    res["type"] = typeStr;
+
+    if (!condition.empty()) {
+      res["condition"] = condition;
+    }
+
+    return res;
+  }
 };
 
 struct HWDebugVarDef {
@@ -60,6 +116,10 @@ struct HWDebugVarDef {
   std::string value;
   // for how it's always RTL value
   bool rtl = true;
+
+  [[nodiscard]] llvm::json::Value toJSON() const {
+    return llvm::json::Object({{"name", name}, {"value", value}, {"rtl", rtl}});
+  }
 };
 
 struct HWModuleInfo : public HWDebugScope {
@@ -71,6 +131,29 @@ public:
   std::map<std::string, std::string> instances;
 
   explicit HWModuleInfo(HWDebugContext &context) : HWDebugScope(context) {}
+
+  [[nodiscard]] llvm::json::Value toJSON() const override {
+    auto res = getScopeJSON(true);
+    res["name"] = name;
+
+    llvm::json::Array vars;
+    vars.reserve(variables.size());
+    for (auto const &varDef : variables) {
+      vars.emplace_back(varDef.toJSON());
+    }
+    res["variables"] = std::move(vars);
+
+    if (!instances.empty()) {
+      llvm::json::Array insts;
+      insts.reserve(instances.size());
+      for (auto const &[n, def] : instances) {
+        insts.emplace_back(llvm::json::Object{{"name", n}, {"module", def}});
+      }
+      res["instances"] = std::move(insts);
+    }
+
+    return res;
+  }
 };
 
 struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
@@ -78,6 +161,12 @@ struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
       : HWDebugLineInfo(context, LineType::Declare) {}
 
   HWDebugVarDef variable;
+
+  [[nodiscard]] llvm::json::Value toJSON() const override {
+    auto res = HWDebugLineInfo::toJSON();
+    (*res.getAsObject())["variable"] = std::move(variable.toJSON());
+    return res;
+  }
 };
 
 struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
@@ -86,6 +175,12 @@ struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
       : HWDebugLineInfo(context, LineType::Assign) {}
 
   HWDebugVarDef variable;
+
+  [[nodiscard]] llvm::json::Value toJSON() const override {
+    auto res = HWDebugLineInfo::toJSON();
+    (*res.getAsObject())["variable"] = std::move(variable.toJSON());
+    return res;
+  }
 };
 
 struct HWDebugFile : HWDebugScope {
@@ -96,8 +191,9 @@ public:
   HWModuleInfo *addModule(std::unique_ptr<HWModuleInfo> module,
                           circt::hw::HWModuleOp op) {
     auto const *opPtr = op.getOperation();
-    auto const &iter = scopeMappings.emplace(opPtr, std::move(module));
-    auto *scope = iter.first->second.get();
+    auto &entry = scopes.emplace_back(std::move(module));
+    auto *scope = entry.get();
+    scopeMappings.emplace(opPtr, scope);
     return reinterpret_cast<HWModuleInfo *>(scope);
   }
 
@@ -106,26 +202,34 @@ public:
     if (!op)
       return nullptr;
     auto *parentOp = op->getParentOp();
-    if (!parentOp) return nullptr;
+    if (!parentOp) {
+      return nullptr;
+    }
 
     if (scopeMappings.find(parentOp) == scopeMappings.end()) {
       // need to create a scope entry for that, with type of None
       // then we need to create all the scopes up to the module
       auto scope = getNormalScope(parentOp);
-      scopeMappings.emplace(parentOp, std::move(scope));
+      auto *scopePtr = scopes.emplace_back(std::move(scope)).get();
+      scopeMappings.emplace(parentOp, scopePtr);
       (void)getParentScope(parentOp);
     }
 
-    auto &ptr = scopeMappings.at(parentOp);
+    auto *ptr = scopeMappings.at(parentOp);
 
-    return ptr.get();
+    return ptr;
+  }
+
+  [[nodiscard]] llvm::json::Value toJSON() const override {
+    llvm::json::Object res{{"type", "file"}, {"filename", filename}};
+    setScope(res);
+    return res;
   }
 
 private:
   std::string filename;
   // scope mapping
-  std::unordered_map<const ::mlir::Operation *, std::unique_ptr<HWDebugScope>>
-      scopeMappings;
+  std::unordered_map<const ::mlir::Operation *, HWDebugScope *> scopeMappings;
 
   std::unique_ptr<HWDebugScope> getNormalScope(::mlir::Operation *op) {
     auto ptr = std::make_unique<HWDebugScope>(context);
@@ -148,6 +252,17 @@ public:
       return files.at(filename).get();
     }
     return nullptr;
+  }
+
+  [[nodiscard]] llvm::json::Value toJSON() const {
+    llvm::json::Object res{{"generator", "circt"}};
+    llvm::json::Array array;
+    array.reserve(files.size());
+    for (auto const &[_, file] : files) {
+      array.emplace_back(std::move(file->toJSON()));
+    }
+    res["table"] = std::move(array);
+    return res;
   }
 
 private:
@@ -289,19 +404,22 @@ public:
   // assignment
   // we only care about the target of the assignment
   void visitSV(circt::sv::AssignOp op) {
-    if (!hasDebug(op)) return;
+    if (!hasDebug(op))
+      return;
     auto target = op.dest();
     builder.createAssign(target, op);
   }
 
   void visitSV(circt::sv::BPAssignOp op) {
-    if (!hasDebug(op)) return;
+    if (!hasDebug(op))
+      return;
     auto target = op.dest();
     builder.createAssign(target, op);
   }
 
   void visitSV(circt::sv::PAssignOp op) {
-    if (!hasDebug(op)) return;
+    if (!hasDebug(op))
+      return;
     auto target = op.dest();
     builder.createAssign(target, op);
   }
@@ -415,6 +533,13 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
           visitor.visitBlock(*body);
         });
   }
+  auto json = context.toJSON();
+  std::error_code error;
+  llvm::raw_fd_ostream os(filename, error);
+  if (!error) {
+    os << json;
+  }
+  os.close();
 }
 
 struct ExportDebugTablePass : public ::mlir::OperationPass<mlir::ModuleOp> {
