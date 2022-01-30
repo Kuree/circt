@@ -1142,7 +1142,7 @@ bool TypeLoweringVisitor::visitDecl(WireOp op) {
     return builder->create<WireOp>(field.type, name, attrs, StringAttr{});
   };
   auto handled = lowerProducer(op, clone);
-  if (!handled) {
+  if (!handled && !op->hasAttr("hw.debug.name")) {
     if (auto nameAttr = op->getAttr("name")) {
       op->setAttr("hw.debug.name", nameAttr);
     }
