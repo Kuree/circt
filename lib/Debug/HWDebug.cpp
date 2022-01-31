@@ -26,7 +26,8 @@ struct HWDebugFile;
 struct HWDebugScope;
 class HWDebugContext;
 
-void setEntryLocation(HWDebugScope &scope, const mlir::Location &location);
+void setEntryLocation(HWDebugScope &scope, const mlir::Location &location,
+                      mlir::Operation *op = nullptr);
 
 enum class HWDebugScopeType { None, Assign, Declare, Module, Block };
 
@@ -280,48 +281,6 @@ public:
     return res;
   }
 
-  void fixUpScopes() {
-    // this is some heuristics to deal with the fact that modules declared
-    // in the Firrtl doesn't have correct filenames (they're not encoded in the
-    // firrtl IR file)
-    for (auto const &[filename, file] : files) {
-      for (auto i = 0u; i < file->scopes.size(); i++) {
-        auto *modScope = file->scopes[i];
-        if (modScope && modScope->type() != HWDebugScopeType::Module) {
-          // need to move another file's module here
-          assert(modScope->op);
-          // search for different module files
-          auto *modDef = modScope->op->getParentOp();
-          if (!modDef) {
-            // delete it since this one doesn't have a parent
-            file->scopes[i] = nullptr;
-            continue;
-          }
-          bool found = false;
-          for (auto &[targetFilename, fileSearch] : files) {
-            if (found)
-              break;
-            if (targetFilename == filename)
-              continue;
-            for (auto j = 0u; j < fileSearch->scopes.size(); j++) {
-              auto *targetScope = fileSearch->scopes[j];
-              if (targetScope && targetScope->op == modDef) {
-                // found it
-                // move the scope to the current file
-                targetScope->scopes.emplace_back(modScope);
-                file->scopes[i] = targetScope;
-                // erase from the current file
-                fileSearch->scopes[j] = nullptr;
-                found = true;
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
   template <typename T, typename... Args>
   T *createScope(Args &&...args) {
     auto ptr = std::make_unique<T>(std::forward<Args>(args)...);
@@ -339,13 +298,20 @@ HWDebugScope *HWDebugFile::getNormalScope(::mlir::Operation *op) {
   return ptr;
 }
 
-void setEntryLocation(HWDebugScope &scope, const mlir::Location &location) {
+void setEntryLocation(HWDebugScope &scope, const mlir::Location &location,
+                      mlir::Operation *op) {
   // need to get the containing module, as well as the line number
   // information
   auto const fileLoc = location.cast<::mlir::FileLineColLoc>();
-  auto const filename = fileLoc.getFilename();
+  auto filename = fileLoc.getFilename();
   auto const line = fileLoc.getLine();
   auto const column = fileLoc.getColumn();
+
+  if (op) {
+    if (auto debugFilename = op->getAttr("hw.debug.filename")) {
+      filename = debugFilename.cast<mlir::StringAttr>();
+    }
+  }
 
   scope.file = scope.context.createFile(filename.str());
   scope.line = line;
@@ -407,7 +373,7 @@ public:
 
   HWModuleInfo *createModule(circt::hw::HWModuleOp *op) {
     auto *info = context.createScope<HWModuleInfo>(context, op->getOperation());
-    setEntryLocation(*info, op->getLoc());
+    setEntryLocation(*info, op->getLoc(), op->getOperation());
     if (info->file) {
       return info->file->addModule(info, *op);
     }
@@ -589,6 +555,27 @@ private:
   }
 };
 
+void fixModuleFilename(circt::hw::HWModuleOp op) {
+  if (op->hasAttr("hw.debug.filename")) return;
+  auto getFilename = [](mlir::Operation *op) {
+    return op->getLoc().cast<::mlir::FileLineColLoc>().getFilename();
+  };
+  auto filename = getFilename(op);
+  // if the underlying name is different, add a name attribute to override the
+  // filename
+  for (auto &entry : *op.getBodyBlock()) {
+    auto entryFilename = getFilename(&entry);
+    if (entryFilename.str() != filename.str()) {
+      // override the module filename
+      // this happens in Firrtl, which doesn't encode location for module
+      printf("fix it to :%s\n", entryFilename.str().c_str());
+      op->setAttr("hw.debug.filename", entryFilename);
+      // done
+      return;
+    }
+  }
+}
+
 void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   // collect all the files
   HWDebugContext context;
@@ -596,6 +583,8 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   for (auto &op : *moduleOp.getBody()) {
     mlir::TypeSwitch<mlir::Operation *>(&op).Case<circt::hw::HWModuleOp>(
         [&builder](circt::hw::HWModuleOp mod) {
+          // fix the filename using heuristics
+          fixModuleFilename(mod);
           // get verilog name
           auto defName = circt::hw::getVerilogModuleNameAttr(mod).str();
           if (defName.empty())
@@ -607,8 +596,6 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
           visitor.visitBlock(*body);
         });
   }
-  // fix scopes
-  context.fixUpScopes();
   auto json = context.toJSON();
   std::error_code error;
   llvm::raw_fd_ostream os(filename, error);

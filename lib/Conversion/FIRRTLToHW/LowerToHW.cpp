@@ -970,6 +970,26 @@ FIRRTLModuleLowering::lowerModule(FModuleOp oldModule, Block *topLevelModule,
   if (failed)
     return {};
   loweringState.processRemainingAnnotations(oldModule, annos);
+
+  // need to fix filename. Firrtl does not encode location for module
+  // we use a hack that nodes always containing filenames
+  // even so, some random filenames still get in. need to run a majority
+  // vote
+  std::unordered_map<std::string, uint32_t> count;
+  for (auto &entry : *oldModule.getBody()) {
+    if (auto nodeOp = llvm::dyn_cast<NodeOp>(entry)) {
+      auto filename = nodeOp.getLoc().cast<FileLineColLoc>().getFilename();
+      count[filename.str()]++;
+    }
+  }
+  std::string newFilename = count.begin()->first;
+  for (auto const &[countFilename, c] : count) {
+    if (count.at(newFilename) < c) {
+      newFilename = countFilename;
+    }
+  }
+  newModule->setAttr("hw.debug.filename",
+                     StringAttr::get(newModule->getContext(), newFilename));
   return newModule;
 }
 
