@@ -28,6 +28,25 @@ class HWDebugContext;
 
 void setEntryLocation(HWDebugScope &scope, const mlir::Location &location);
 
+enum class HWDebugScopeType { None, Assign, Declare, Module, Block };
+
+std::string toString(HWDebugScopeType type) {
+  switch (type) {
+  case HWDebugScopeType::None:
+    return "none";
+  case HWDebugScopeType::Assign:
+    return "assign";
+  case HWDebugScopeType::Declare:
+    return "decl";
+  case HWDebugScopeType::Module:
+    return "module";
+  case HWDebugScopeType::Block:
+    return "block";
+  default:
+    llvm_unreachable("unknown type");
+  }
+}
+
 struct HWDebugScope {
 public:
   explicit HWDebugScope(HWDebugContext &context) : context(context) {}
@@ -44,10 +63,12 @@ public:
 
   // NOLINTNEXTLINE
   [[nodiscard]] virtual llvm::json::Value toJSON() const {
-    // by default, it's block scope
     auto res = getScopeJSON(true);
-    res["type"] = "block";
     return res;
+  }
+
+  [[nodiscard]] virtual HWDebugScopeType type() const {
+    return scopes.empty() ? HWDebugScopeType::None : HWDebugScopeType::Block;
   }
 
 protected:
@@ -57,12 +78,14 @@ protected:
     if (column > 0) {
       res["column"] = column;
     }
+    res["type"] = toString(type());
     if (includeScope) {
       setScope(res);
     }
     return res;
   }
 
+  // NOLINTNEXTLINE
   void setScope(llvm::json::Object &obj) const {
     llvm::json::Array array;
     array.reserve(scopes.size());
@@ -74,40 +97,31 @@ protected:
 };
 
 struct HWDebugLineInfo : HWDebugScope {
-  enum class LineType { None, Assign, Declare };
+  enum class LineType {
+    None = static_cast<int>(HWDebugScopeType::None),
+    Assign = static_cast<int>(HWDebugScopeType::Assign),
+    Declare = static_cast<int>(HWDebugScopeType::Declare),
+  };
 
   std::string condition;
 
-  LineType type;
+  LineType lineType;
 
   explicit HWDebugLineInfo(HWDebugContext &context)
-      : HWDebugScope(context), type(LineType::None) {}
+      : HWDebugScope(context), lineType(LineType::None) {}
   HWDebugLineInfo(HWDebugContext &context, LineType type)
-      : HWDebugScope(context), type(type) {}
+      : HWDebugScope(context), lineType(type) {}
 
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = getScopeJSON(false);
-    std::string typeStr;
-    switch (type) {
-    case LineType::None:
-      typeStr = "none";
-      break;
-    case LineType::Assign:
-      typeStr = "assign";
-      break;
-    case LineType::Declare:
-      typeStr = "decl";
-      break;
-    default:
-      llvm_unreachable("unknown line type");
-    }
-    res["type"] = typeStr;
-
     if (!condition.empty()) {
       res["condition"] = condition;
     }
-
     return res;
+  }
+
+  [[nodiscard]] HWDebugScopeType type() const override {
+    return static_cast<HWDebugScopeType>(lineType);
   }
 };
 
@@ -130,12 +144,14 @@ public:
   std::vector<HWDebugVarDef> variables;
   std::map<std::string, std::string> instances;
 
-  explicit HWModuleInfo(HWDebugContext &context) : HWDebugScope(context) {}
+  mlir::Operation *moduleOp;
+
+  explicit HWModuleInfo(HWDebugContext &context, mlir::Operation *moduleOp)
+      : HWDebugScope(context), moduleOp(moduleOp) {}
 
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = getScopeJSON(true);
     res["name"] = name;
-    res["type"] = "module";
 
     llvm::json::Array vars;
     vars.reserve(variables.size());
@@ -154,6 +170,10 @@ public:
     }
 
     return res;
+  }
+
+  [[nodiscard]] HWDebugScopeType type() const override {
+    return HWDebugScopeType::Module;
   }
 };
 
@@ -266,6 +286,14 @@ public:
     return res;
   }
 
+  void fixUpScopes() {
+    // this is some heuristics to deal with the fact that modules declared
+    // in the Firrtl doesn't have correct filenames (they're not encoded in the
+    // firrtl IR file
+    for (auto const &file : files) {
+    }
+  }
+
 private:
   std::unordered_map<std::string, std::unique_ptr<HWDebugFile>> files;
 };
@@ -336,12 +364,12 @@ public:
     return var;
   }
 
-  HWModuleInfo *createModule(const circt::hw::HWModuleOp &op) {
-    auto info = std::make_unique<HWModuleInfo>(context);
+  HWModuleInfo *createModule(circt::hw::HWModuleOp *op) {
+    auto info = std::make_unique<HWModuleInfo>(context, op->getOperation());
     setEntryLocation(*info, op->getLoc());
     if (info->file) {
       auto *ptr = info.get();
-      return ptr->file->addModule(std::move(info), op);
+      return ptr->file->addModule(std::move(info), *op);
     }
     return nullptr;
   }
@@ -532,13 +560,15 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
           auto defName = circt::hw::getVerilogModuleNameAttr(mod).str();
           if (defName.empty())
             return;
-          auto *module = builder.createModule(mod);
+          auto *module = builder.createModule(&mod);
           module->name = defName;
           DebugStmtVisitor visitor(builder, module);
           auto *body = mod.getBodyBlock();
           visitor.visitBlock(*body);
         });
   }
+  // fix scopes
+  context.fixUpScopes();
   auto json = context.toJSON();
   std::error_code error;
   llvm::raw_fd_ostream os(filename, error);
