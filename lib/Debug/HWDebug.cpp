@@ -135,6 +135,7 @@ public:
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = getScopeJSON(true);
     res["name"] = name;
+    res["type"] = "module";
 
     llvm::json::Array vars;
     vars.reserve(variables.size());
@@ -527,7 +528,12 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   for (auto &op : *moduleOp.getBody()) {
     mlir::TypeSwitch<mlir::Operation *>(&op).Case<circt::hw::HWModuleOp>(
         [&builder](circt::hw::HWModuleOp mod) {
+          // get verilog name
+          auto defName = circt::hw::getVerilogModuleNameAttr(mod).str();
+          if (defName.empty())
+            return;
           auto *module = builder.createModule(mod);
+          module->name = defName;
           DebugStmtVisitor visitor(builder, module);
           auto *body = mod.getBodyBlock();
           visitor.visitBlock(*body);
