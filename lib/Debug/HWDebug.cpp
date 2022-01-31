@@ -49,7 +49,8 @@ std::string toString(HWDebugScopeType type) {
 
 struct HWDebugScope {
 public:
-  explicit HWDebugScope(HWDebugContext &context) : context(context) {}
+  explicit HWDebugScope(HWDebugContext &context, mlir::Operation *op)
+      : context(context), op(op) {}
 
   std::vector<HWDebugScope *> scopes;
 
@@ -61,7 +62,7 @@ public:
 
   HWDebugContext &context;
 
-  mlir::Operation *moduleOp = nullptr;
+  mlir::Operation *op;
 
   // NOLINTNEXTLINE
   [[nodiscard]] virtual llvm::json::Value toJSON() const {
@@ -91,8 +92,9 @@ protected:
   void setScope(llvm::json::Object &obj) const {
     llvm::json::Array array;
     array.reserve(scopes.size());
-    for (auto const &scope : scopes) {
-      array.emplace_back(std::move(scope->toJSON()));
+    for (auto const *scope : scopes) {
+      if (scope)
+        array.emplace_back(std::move(scope->toJSON()));
     }
     obj["scopes"] = std::move(array);
   }
@@ -109,10 +111,8 @@ struct HWDebugLineInfo : HWDebugScope {
 
   LineType lineType;
 
-  explicit HWDebugLineInfo(HWDebugContext &context)
-      : HWDebugScope(context), lineType(LineType::None) {}
-  HWDebugLineInfo(HWDebugContext &context, LineType type)
-      : HWDebugScope(context), lineType(type) {}
+  HWDebugLineInfo(HWDebugContext &context, LineType type, mlir::Operation *op)
+      : HWDebugScope(context, op), lineType(type) {}
 
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = getScopeJSON(false);
@@ -147,9 +147,7 @@ public:
   std::map<std::string, std::string> instances;
 
   explicit HWModuleInfo(HWDebugContext &context, mlir::Operation *moduleOp)
-      : HWDebugScope(context) {
-    this->moduleOp = moduleOp;
-  }
+      : HWDebugScope(context, moduleOp) {}
 
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = getScopeJSON(true);
@@ -180,8 +178,8 @@ public:
 };
 
 struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
-  HWDebugVarDeclareLineInfo(HWDebugContext &context)
-      : HWDebugLineInfo(context, LineType::Declare) {}
+  HWDebugVarDeclareLineInfo(HWDebugContext &context, mlir::Operation *op)
+      : HWDebugLineInfo(context, LineType::Declare, op) {}
 
   HWDebugVarDef variable;
 
@@ -194,8 +192,8 @@ struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
 
 struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
   // This also encodes mapping information
-  HWDebugVarAssignLineInfo(HWDebugContext &context)
-      : HWDebugLineInfo(context, LineType::Assign) {}
+  HWDebugVarAssignLineInfo(HWDebugContext &context, mlir::Operation *op)
+      : HWDebugLineInfo(context, LineType::Assign, op) {}
 
   HWDebugVarDef variable;
 
@@ -209,7 +207,7 @@ struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
 struct HWDebugFile : HWDebugScope {
 public:
   HWDebugFile(HWDebugContext &context, const std::string &filename)
-      : HWDebugScope(context), filename(filename) {}
+      : HWDebugScope(context, nullptr), filename(filename) {}
 
   HWModuleInfo *addModule(HWModuleInfo *module, circt::hw::HWModuleOp op) {
     auto const *opPtr = op.getOperation();
@@ -285,13 +283,40 @@ public:
   void fixUpScopes() {
     // this is some heuristics to deal with the fact that modules declared
     // in the Firrtl doesn't have correct filenames (they're not encoded in the
-    // firrtl IR file
+    // firrtl IR file)
     for (auto const &[filename, file] : files) {
       for (auto i = 0u; i < file->scopes.size(); i++) {
-        auto &mod = file->scopes[i];
-        if (mod->type() != HWDebugScopeType::Module) {
+        auto *modScope = file->scopes[i];
+        if (modScope && modScope->type() != HWDebugScopeType::Module) {
           // need to move another file's module here
-          assert(!mod->moduleOp);
+          assert(modScope->op);
+          // search for different module files
+          auto *modDef = modScope->op->getParentOp();
+          if (!modDef) {
+            // delete it since this one doesn't have a parent
+            file->scopes[i] = nullptr;
+            continue;
+          }
+          bool found = false;
+          for (auto &[targetFilename, fileSearch] : files) {
+            if (found)
+              break;
+            if (targetFilename == filename)
+              continue;
+            for (auto j = 0u; j < fileSearch->scopes.size(); j++) {
+              auto *targetScope = fileSearch->scopes[j];
+              if (targetScope && targetScope->op == modDef) {
+                // found it
+                // move the scope to the current file
+                targetScope->scopes.emplace_back(modScope);
+                file->scopes[i] = targetScope;
+                // erase from the current file
+                fileSearch->scopes[j] = nullptr;
+                found = true;
+                break;
+              }
+            }
+          }
         }
       }
     }
@@ -309,7 +334,7 @@ private:
 };
 
 HWDebugScope *HWDebugFile::getNormalScope(::mlir::Operation *op) {
-  auto *ptr = context.createScope<HWDebugScope>(context);
+  auto *ptr = context.createScope<HWDebugScope>(context, op);
   setEntryLocation(*ptr, op->getLoc());
   return ptr;
 }
@@ -337,15 +362,15 @@ public:
 
   HWDebugVarDeclareLineInfo *createVarDeclaration(::mlir::Value value) {
     auto loc = value.getLoc();
-    auto *targetOp = getDebugOp(value, value.getDefiningOp());
+    auto *op = value.getDefiningOp();
+    auto *targetOp = getDebugOp(value, op);
     if (!targetOp)
       return nullptr;
 
     // need to get the containing module, as well as the line number
     // information
-    auto *info = context.createScope<HWDebugVarDeclareLineInfo>(context);
+    auto *info = context.createScope<HWDebugVarDeclareLineInfo>(context, op);
     setEntryLocation(*info, loc);
-    auto *op = value.getDefiningOp();
     info->variable = createVarDef(targetOp);
     // add to scope
     auto *result = addToScope(info, op);
@@ -361,7 +386,7 @@ public:
 
     auto loc = op->getLoc();
 
-    auto *assign = context.createScope<HWDebugVarAssignLineInfo>(context);
+    auto *assign = context.createScope<HWDebugVarAssignLineInfo>(context, op);
     setEntryLocation(*assign, loc);
 
     assign->variable = createVarDef(targetOp);
