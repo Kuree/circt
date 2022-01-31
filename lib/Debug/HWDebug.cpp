@@ -51,7 +51,7 @@ struct HWDebugScope {
 public:
   explicit HWDebugScope(HWDebugContext &context) : context(context) {}
 
-  std::vector<std::unique_ptr<HWDebugScope>> scopes;
+  std::vector<HWDebugScope *> scopes;
 
   uint32_t line = 0;
   uint32_t column = 0;
@@ -60,6 +60,8 @@ public:
   HWDebugFile *file = nullptr;
 
   HWDebugContext &context;
+
+  mlir::Operation *moduleOp = nullptr;
 
   // NOLINTNEXTLINE
   [[nodiscard]] virtual llvm::json::Value toJSON() const {
@@ -144,10 +146,10 @@ public:
   std::vector<HWDebugVarDef> variables;
   std::map<std::string, std::string> instances;
 
-  mlir::Operation *moduleOp;
-
   explicit HWModuleInfo(HWDebugContext &context, mlir::Operation *moduleOp)
-      : HWDebugScope(context), moduleOp(moduleOp) {}
+      : HWDebugScope(context) {
+    this->moduleOp = moduleOp;
+  }
 
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = getScopeJSON(true);
@@ -209,13 +211,11 @@ public:
   HWDebugFile(HWDebugContext &context, const std::string &filename)
       : HWDebugScope(context), filename(filename) {}
 
-  HWModuleInfo *addModule(std::unique_ptr<HWModuleInfo> module,
-                          circt::hw::HWModuleOp op) {
+  HWModuleInfo *addModule(HWModuleInfo *module, circt::hw::HWModuleOp op) {
     auto const *opPtr = op.getOperation();
-    auto &entry = scopes.emplace_back(std::move(module));
-    auto *scope = entry.get();
-    scopeMappings.emplace(opPtr, scope);
-    return reinterpret_cast<HWModuleInfo *>(scope);
+    scopes.emplace_back(module);
+    scopeMappings.emplace(opPtr, module);
+    return module;
   }
 
   // NOLINTNEXTLINE
@@ -230,9 +230,9 @@ public:
     if (scopeMappings.find(parentOp) == scopeMappings.end()) {
       // need to create a scope entry for that, with type of None
       // then we need to create all the scopes up to the module
-      auto scope = getNormalScope(parentOp);
-      auto *scopePtr = scopes.emplace_back(std::move(scope)).get();
-      scopeMappings.emplace(parentOp, scopePtr);
+      auto *scope = getNormalScope(parentOp);
+      scopes.emplace_back(scope);
+      scopeMappings.emplace(parentOp, scope);
       (void)getParentScope(parentOp);
     }
 
@@ -252,11 +252,7 @@ private:
   // scope mapping
   std::unordered_map<const ::mlir::Operation *, HWDebugScope *> scopeMappings;
 
-  std::unique_ptr<HWDebugScope> getNormalScope(::mlir::Operation *op) {
-    auto ptr = std::make_unique<HWDebugScope>(context);
-    setEntryLocation(*ptr, op->getLoc());
-    return std::move(ptr);
-  }
+  HWDebugScope *getNormalScope(::mlir::Operation *op);
 };
 
 class HWDebugContext {
@@ -290,13 +286,33 @@ public:
     // this is some heuristics to deal with the fact that modules declared
     // in the Firrtl doesn't have correct filenames (they're not encoded in the
     // firrtl IR file
-    for (auto const &file : files) {
+    for (auto const &[filename, file] : files) {
+      for (auto i = 0u; i < file->scopes.size(); i++) {
+        auto &mod = file->scopes[i];
+        if (mod->type() != HWDebugScopeType::Module) {
+          // need to move another file's module here
+          assert(!mod->moduleOp);
+        }
+      }
     }
+  }
+
+  template <typename T, typename... Args>
+  T *createScope(Args &&...args) {
+    auto ptr = std::make_unique<T>(std::forward<Args>(args)...);
+    return reinterpret_cast<T *>(scopes.emplace_back(std::move(ptr)).get());
   }
 
 private:
   std::unordered_map<std::string, std::unique_ptr<HWDebugFile>> files;
+  std::vector<std::unique_ptr<HWDebugScope>> scopes;
 };
+
+HWDebugScope *HWDebugFile::getNormalScope(::mlir::Operation *op) {
+  auto *ptr = context.createScope<HWDebugScope>(context);
+  setEntryLocation(*ptr, op->getLoc());
+  return ptr;
+}
 
 void setEntryLocation(HWDebugScope &scope, const mlir::Location &location) {
   // need to get the containing module, as well as the line number
@@ -327,12 +343,12 @@ public:
 
     // need to get the containing module, as well as the line number
     // information
-    auto info = std::make_unique<HWDebugVarDeclareLineInfo>(context);
+    auto *info = context.createScope<HWDebugVarDeclareLineInfo>(context);
     setEntryLocation(*info, loc);
     auto *op = value.getDefiningOp();
     info->variable = createVarDef(targetOp);
     // add to scope
-    auto *result = addToScope(std::move(info), op);
+    auto *result = addToScope(info, op);
     return result;
   }
 
@@ -345,13 +361,13 @@ public:
 
     auto loc = op->getLoc();
 
-    auto assign = std::make_unique<HWDebugVarAssignLineInfo>(context);
+    auto *assign = context.createScope<HWDebugVarAssignLineInfo>(context);
     setEntryLocation(*assign, loc);
 
     assign->variable = createVarDef(targetOp);
 
     // add to scope
-    auto *result = addToScope(std::move(assign), op);
+    auto *result = addToScope(assign, op);
     return result;
   }
 
@@ -365,11 +381,10 @@ public:
   }
 
   HWModuleInfo *createModule(circt::hw::HWModuleOp *op) {
-    auto info = std::make_unique<HWModuleInfo>(context, op->getOperation());
+    auto *info = context.createScope<HWModuleInfo>(context, op->getOperation());
     setEntryLocation(*info, op->getLoc());
     if (info->file) {
-      auto *ptr = info.get();
-      return ptr->file->addModule(std::move(info), *op);
+      return info->file->addModule(info, *op);
     }
     return nullptr;
   }
@@ -378,11 +393,11 @@ private:
   HWDebugContext &context;
 
   template <typename T>
-  T *addToScope(std::unique_ptr<T> info, ::mlir::Operation *op) {
+  T *addToScope(T *info, ::mlir::Operation *op) {
     auto *scope = info->file->getParentScope(op);
     if (scope) {
-      auto &ptr = scope->scopes.emplace_back(std::move(info));
-      return reinterpret_cast<T *>(ptr.get());
+      scope->scopes.emplace_back(info);
+      return info;
     }
     return nullptr;
   }
