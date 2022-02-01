@@ -75,7 +75,7 @@ public:
 
   // NOLINTNEXTLINE
   [[nodiscard]] virtual llvm::json::Value toJSON() const {
-    auto res = getScopeJSON(true);
+    auto res = getScopeJSON(type() == HWDebugScopeType::Block);
     return res;
   }
 
@@ -94,7 +94,7 @@ protected:
     if (includeScope) {
       setScope(res);
     }
-    if (type() == HWDebugScopeType::Block) {
+    if (type() == HWDebugScopeType::Block && !filename.empty()) {
       res["filename"] = filename;
     }
     if (!condition.empty()) {
