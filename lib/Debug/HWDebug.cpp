@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "circt/Dialect/HW/HWOps.h"
@@ -207,6 +208,20 @@ struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
   }
 };
 
+std::string findTop(const std::vector<HWModuleInfo *> &modules) {
+  std::unordered_set<std::string> names;
+  for (auto const *mod : modules) {
+    names.emplace(mod->name);
+  }
+  for (auto const *m : modules) {
+    for (auto const &[_, name] : m->instances) {
+      names.erase(name);
+    }
+  }
+  assert(names.size() == 1);
+  return *names.begin();
+}
+
 class HWDebugContext {
 public:
   [[nodiscard]] llvm::json::Value toJSON() const {
@@ -217,6 +232,8 @@ public:
       array.emplace_back(std::move(module->toJSON()));
     }
     res["table"] = std::move(array);
+    auto top = findTop(modules);
+    res["top"] = top;
     return res;
   }
 
@@ -605,6 +622,7 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
     fixScopeFilename(m, builder);
   }
   auto json = context.toJSON();
+
   std::error_code error;
   llvm::raw_fd_ostream os(filename, error);
   if (!error) {
