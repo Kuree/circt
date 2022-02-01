@@ -714,7 +714,7 @@ mlir::StringAttr getFilenameFromScopeOp(HWDebugScope *scope) {
 }
 
 // NOLINTNEXTLINE
-void fixScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
+void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
   // assuming the current scope is already fixed
   auto scopeFilename = getFilenameFromScopeOp(scope);
   for (auto i = 0u; i < scope->scopes.size(); i++) {
@@ -728,6 +728,8 @@ void fixScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
       } else {
         // need to create a scope to contain this one
         auto *newScope = builder.createScope(entry->op);
+        // set the line to 0 since it's an artificial scope
+        newScope->line = 0;
         newScope->filename = entryFilename.str();
         newScope->scopes.emplace_back(entry);
         entry->parent = newScope;
@@ -736,9 +738,39 @@ void fixScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
       }
     }
   }
-  // recursively fixing its scopes
+  // merge scopes with the same filename
+  // we assume at this stage most of the entries are block entry now
+  llvm::DenseMap<mlir::StringRef, HWDebugScope *> filenameMapping;
+  for (auto i = 0u; i < scope->scopes.size(); i++) {
+    auto *entry = scope->scopes[i];
+    // we only touch non-existing block, i.e. created for holding actual
+    // scopes
+    if (entry->type() == HWDebugScopeType::Block && entry->line == 0) {
+      auto filename = entry->filename;
+      if (filenameMapping.find(filename) == filenameMapping.end()) {
+        filenameMapping[filename] = entry;
+      } else {
+        auto *parent = filenameMapping[filename];
+        // merge
+        parent->scopes.reserve(entry->scopes.size() + parent->scopes.size());
+        for (auto *p: entry->scopes) {
+          parent->scopes.emplace_back(p);
+          p->parent = p;
+        }
+
+        // delete the old entry
+        scope->scopes[i] = nullptr;
+      }
+    }
+  }
+  // clear the nullptr
+  scope->scopes.erase(std::remove_if(scope->scopes.begin(), scope->scopes.end(),
+                                     [](auto *p) { return !p; }),
+                      scope->scopes.end());
+
+  // recursively setting filenames
   for (auto *entry : scope->scopes) {
-    fixScopeFilename(entry, builder);
+    setScopeFilename(entry, builder);
   }
 }
 
@@ -763,7 +795,7 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   // fixing filenames
   auto const &modules = context.getModules();
   for (auto *m : modules) {
-    fixScopeFilename(m, builder);
+    setScopeFilename(m, builder);
   }
   auto json = context.toJSON();
 
