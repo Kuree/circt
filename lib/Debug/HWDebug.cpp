@@ -235,33 +235,12 @@ public:
   template <typename T, typename... Args>
   T *createScope(Args &&...args) {
     auto ptr = std::make_unique<T>(std::forward<Args>(args)...);
+    auto *res = ptr.get();
+    scopes.emplace_back(std::move(ptr));
     if constexpr (std::is_same<T, HWModuleInfo>::value) {
-      modules.emplace_back(ptr.get());
+      modules.emplace_back(res);
     }
-    return reinterpret_cast<T *>(scopes.emplace_back(std::move(ptr)).get());
-  }
-
-  // NOLINTNEXTLINE
-  HWDebugScope *getParentScope(::mlir::Operation *op) {
-    if (!op)
-      return nullptr;
-    auto *parentOp = op->getParentOp();
-    if (!parentOp) {
-      return nullptr;
-    }
-
-    if (scopeMappings.find(parentOp) == scopeMappings.end()) {
-      // need to create a scope entry for that, with type of None
-      // then we need to create all the scopes up to the module
-      auto *scope = getNormalScope(parentOp);
-      scopes.emplace_back(scope);
-      scopeMappings.emplace(parentOp, scope);
-      (void)getParentScope(parentOp);
-    }
-
-    auto *ptr = scopeMappings.at(parentOp);
-
-    return ptr;
+    return res;
   }
 
   HWDebugScope *getNormalScope(::mlir::Operation *op) {
@@ -306,9 +285,7 @@ public:
     auto *info = context.createScope<HWDebugVarDeclareLineInfo>(context, op);
     setEntryLocation(*info, loc);
     info->variable = createVarDef(targetOp);
-    // add to scope
-    auto *result = addToScope(info, op);
-    return result;
+    return info;
   }
 
   HWDebugVarAssignLineInfo *createAssign(::mlir::Value value,
@@ -325,9 +302,7 @@ public:
 
     assign->variable = createVarDef(targetOp);
 
-    // add to scope
-    auto *result = addToScope(assign, op);
-    return result;
+    return assign;
   }
 
   HWDebugVarDef createVarDef(::mlir::Operation *op) {
@@ -345,22 +320,18 @@ public:
     return info;
   }
 
-  HWDebugScope *createScope(::mlir::Operation *op) {
-    return context.getParentScope(op);
+  HWDebugScope *createScope(::mlir::Operation *op,
+                            HWDebugScope *parent = nullptr) {
+    auto *res = context.getNormalScope(op);
+    if (parent) {
+      res->parent = parent;
+      parent->scopes.emplace_back(res);
+    }
+    return res;
   }
 
 private:
   HWDebugContext &context;
-
-  template <typename T>
-  T *addToScope(T *info, ::mlir::Operation *op) {
-    auto *scope = context.getParentScope(op);
-    if (scope) {
-      scope->scopes.emplace_back(info);
-      return info;
-    }
-    return nullptr;
-  }
 
   static mlir::Operation *getDebugOp(mlir::Value value, mlir::Operation *op) {
     auto *valueOP = value.getDefiningOp();
@@ -408,27 +379,27 @@ public:
   // assignment
   // we only care about the target of the assignment
   void visitSV(circt::sv::AssignOp op) {
-    if (!hasDebug(op))
-      return;
-    auto target = op.dest();
-    auto *assign = builder.createAssign(target, op);
-    currentScope->scopes.emplace_back(assign);
+    if (hasDebug(op)) {
+      auto target = op.dest();
+      auto *assign = builder.createAssign(target, op);
+      currentScope->scopes.emplace_back(assign);
+    }
   }
 
   void visitSV(circt::sv::BPAssignOp op) {
-    if (!hasDebug(op))
-      return;
-    auto target = op.dest();
-    auto *assign = builder.createAssign(target, op);
-    currentScope->scopes.emplace_back(assign);
+    if (hasDebug(op)) {
+      auto target = op.dest();
+      auto *assign = builder.createAssign(target, op);
+      currentScope->scopes.emplace_back(assign);
+    }
   }
 
   void visitSV(circt::sv::PAssignOp op) {
-    if (!hasDebug(op))
-      return;
-    auto target = op.dest();
-    auto *assign = builder.createAssign(target, op);
-    currentScope->scopes.emplace_back(assign);
+    if (hasDebug(op)) {
+      auto target = op.dest();
+      auto *assign = builder.createAssign(target, op);
+      currentScope->scopes.emplace_back(assign);
+    }
   }
 
   void visitStmt(circt::hw::OutputOp op) {
@@ -443,7 +414,7 @@ public:
   // visit blocks
   void visitSV(circt::sv::AlwaysOp op) {
     // creating a scope
-    auto *scope = builder.createScope(op);
+    auto *scope = builder.createScope(op, currentScope);
     auto *temp = currentScope;
     currentScope = scope;
     visitBlock(*op.getBodyBlock());
@@ -451,7 +422,7 @@ public:
   }
 
   void visitSV(circt::sv::AlwaysCombOp op) { // creating a scope
-    auto *scope = builder.createScope(op);
+    auto *scope = builder.createScope(op, currentScope);
     auto *temp = currentScope;
     currentScope = scope;
     visitBlock(*op.getBodyBlock());
@@ -461,7 +432,7 @@ public:
   void visitSV(circt::sv::AlwaysFFOp op) {
     if (op.getResetBlock()) {
       // creating a scope
-      auto *scope = builder.createScope(op);
+      auto *scope = builder.createScope(op, currentScope);
       auto *temp = currentScope;
       currentScope = scope;
       visitBlock(*op.getResetBlock());
@@ -469,7 +440,7 @@ public:
     }
     {
       // creating a scope
-      auto *scope = builder.createScope(op);
+      auto *scope = builder.createScope(op, currentScope);
       auto *temp = currentScope;
       currentScope = scope;
       visitBlock(*op.getBodyBlock());
@@ -478,11 +449,32 @@ public:
   }
 
   void visitSV(circt::sv::InitialOp op) { // creating a scope
-    auto *scope = builder.createScope(op);
+    auto *scope = builder.createScope(op, currentScope);
     auto *temp = currentScope;
     currentScope = scope;
     visitBlock(*op.getBodyBlock());
     currentScope = temp;
+  }
+
+  void visitSV(circt::sv::IfOp op) {
+    // first, the statement itself is a line
+    builder.createScope(op, currentScope);
+    if (auto *body = op.getThenBlock()) {
+      // true
+      auto *trueBlock = builder.createScope(op, currentScope);
+      auto *temp = currentScope;
+      currentScope = trueBlock;
+      visitBlock(*body);
+      currentScope = temp;
+    }
+    if (auto *elseBody = op.getElseBlock()) {
+      // false
+      auto *trueBlock = builder.createScope(op, currentScope);
+      auto *temp = currentScope;
+      currentScope = trueBlock;
+      visitBlock(*elseBody);
+      currentScope = temp;
+    }
   }
 
   // noop HW visit functions
@@ -532,7 +524,6 @@ public:
   void visitSV(circt::sv::ErrorOp) {}
   void visitSV(circt::sv::WarningOp) {}
   void visitSV(circt::sv::InfoOp) {}
-  void visitSV(circt::sv::IfOp) {}
 
   // ignore invalid stuff
   void visitInvalidStmt(Operation *) {}
