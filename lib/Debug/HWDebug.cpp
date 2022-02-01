@@ -99,7 +99,7 @@ protected:
       if (scope)
         array.emplace_back(std::move(scope->toJSON()));
     }
-    obj["scopes"] = std::move(array);
+    obj["scope"] = std::move(array);
   }
 };
 
@@ -567,6 +567,7 @@ void fixScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
       } else {
         // need to create a scope to contain this one
         auto *newScope = builder.createScope(entry->op);
+        newScope->filename = entryFilename.str();
         newScope->scopes.emplace_back(entry);
         entry->parent = newScope;
         newScope->parent = scope;
