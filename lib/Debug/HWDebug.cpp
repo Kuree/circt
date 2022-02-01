@@ -7,6 +7,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "circt/Dialect/Comb/CombVisitors.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWVisitors.h"
 #include "circt/Dialect/SV/SVOps.h"
@@ -16,10 +17,16 @@
 #include "llvm/Support/JSON.h"
 
 mlir::StringRef getSymOpName(mlir::Operation *symOp);
+mlir::StringRef getPortVerilogName(mlir::Operation *module,
+                                   circt::hw::PortInfo port);
 
 namespace circt::hw {
 mlir::StringAttr getVerilogModuleNameAttr(mlir::Operation *module);
 } // namespace circt::hw
+
+namespace circt::ExportVerilog {
+bool isVerilogExpression(Operation *op);
+} // namespace circt::ExportVerilog
 
 namespace circt::debug {
 
@@ -58,6 +65,7 @@ public:
   std::string filename;
   uint32_t line = 0;
   uint32_t column = 0;
+  std::string condition;
 
   HWDebugScope *parent = nullptr;
 
@@ -88,6 +96,9 @@ protected:
     }
     if (type() == HWDebugScopeType::Block) {
       res["filename"] = filename;
+    }
+    if (!condition.empty()) {
+      res["condition"] = condition;
     }
     return res;
   }
@@ -150,8 +161,20 @@ public:
   std::vector<HWDebugVarDef> variables;
   std::map<std::string, std::string> instances;
 
-  explicit HWModuleInfo(HWDebugContext &context, mlir::Operation *moduleOp)
-      : HWDebugScope(context, moduleOp) {}
+  explicit HWModuleInfo(HWDebugContext &context,
+                        circt::hw::HWModuleOp *moduleOp)
+      : HWDebugScope(context, moduleOp->getOperation()) {
+    // index the port names by value
+    auto portInfo = moduleOp->getAllPorts();
+    for (auto &port : portInfo) {
+      StringRef n = getPortVerilogName(*moduleOp, port);
+      mlir::Value value;
+      if (!port.isOutput()) {
+        value = moduleOp->getArgument(port.argNum);
+        portNames[value] = n;
+      }
+    }
+  }
 
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = getScopeJSON(true);
@@ -179,6 +202,13 @@ public:
   [[nodiscard]] HWDebugScopeType type() const override {
     return HWDebugScopeType::Module;
   }
+
+  mlir::StringRef getPortName(mlir::Value value) const {
+    return portNames.lookup(value);
+  }
+
+private:
+  llvm::DenseMap<mlir::Value, mlir::StringRef> portNames;
 };
 
 struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
@@ -324,7 +354,7 @@ public:
   }
 
   HWModuleInfo *createModule(circt::hw::HWModuleOp *op) {
-    auto *info = context.createScope<HWModuleInfo>(context, op->getOperation());
+    auto *info = context.createScope<HWModuleInfo>(context, op);
     setEntryLocation(*info, op->getLoc(), op->getOperation());
     return info;
   }
@@ -351,6 +381,106 @@ private:
       return op;
     }
     return nullptr;
+  }
+};
+
+// hgdb only supports a subsets of operations, nor does it support sign
+// conversion. if the expression is complex we need to insert another pass that
+// generate a temp wire that holds the expression and use that in hgdb instead.
+// for now this is not an issue since Chisel is already doing this (somewhat)
+class DebugExprPrinter
+    : public circt::comb::CombinationalVisitor<DebugExprPrinter>,
+      public circt::hw::TypeOpVisitor<DebugExprPrinter> {
+public:
+  explicit DebugExprPrinter(llvm::raw_ostream &os, HWModuleInfo *module)
+      : os(os), module(module) {}
+
+  void printExpr(mlir::Value value) {
+    auto *op = value.getDefiningOp();
+    if (op && ExportVerilog::isVerilogExpression(op)) {
+      os << getSymOpName(op);
+      return;
+    }
+    if (op) {
+      dispatchCombinationalVisitor(op);
+    } else {
+      auto ref = module->getPortName(value);
+      os << ref;
+    }
+  }
+  // comb ops
+  // supported
+  void visitComb(circt::comb::AddOp op) { visitBinary(op, "+"); }
+  void visitComb(circt::comb::SubOp op) { return visitBinary(op, "-"); }
+  void visitComb(circt::comb::MulOp op) {
+    assert(op.getNumOperands() == 2 && "prelowering should handle variadics");
+    return visitBinary(op, "*");
+  }
+  void visitComb(circt::comb::DivUOp op) { return visitBinary(op, "/"); }
+  void visitComb(circt::comb::DivSOp op) { return visitBinary(op, "/"); }
+  void visitComb(circt::comb::ModUOp op) { return visitBinary(op, "%"); }
+  void visitComb(circt::comb::ModSOp op) { return visitBinary(op, "%"); }
+
+  void visitComb(circt::comb::AndOp op) { return visitBinary(op, "&"); }
+  void visitComb(circt::comb::OrOp op) { return visitBinary(op, "|"); }
+  void visitComb(circt::comb::XorOp op) {
+    if (op.isBinaryNot())
+      return visitUnary(op, "~");
+    return visitBinary(op, "^");
+  }
+
+  // unsupported
+  void visitComb(circt::comb::MuxOp op) { visitUnsupported(op); }
+  void visitComb(circt::comb::ShlOp op) { visitUnsupported(op); }
+  void visitComb(circt::comb::ShrUOp op) { visitUnsupported(op); }
+  void visitComb(circt::comb::ShrSOp op) { visitUnsupported(op); }
+
+  void visitComb(circt::comb::ParityOp op) { visitUnsupported(op); }
+
+  void visitComb(circt::comb::ReplicateOp op) { visitUnsupported(op); }
+  void visitComb(circt::comb::ConcatOp op) { visitUnsupported(op); }
+  void visitComb(circt::comb::ExtractOp op) { visitUnsupported(op); }
+  void visitComb(circt::comb::ICmpOp op) { visitUnsupported(op); }
+
+  // type ops
+  void visitTypeOp(circt::hw::ConstantOp op) { os << op.value(); }
+  void visitTypeOp(circt::hw::ParamValueOp op) { os << op.value(); }
+  // unsupported
+  void visitTypeOp(circt::hw::BitcastOp op) { visitUnsupported(op); }
+  void visitTypeOp(circt::hw::ArraySliceOp op) { visitUnsupported(op); }
+  void visitTypeOp(circt::hw::ArrayGetOp op) { visitUnsupported(op); }
+  void visitTypeOp(circt::hw::ArrayCreateOp op) { visitUnsupported(op); }
+  void visitTypeOp(circt::hw::ArrayConcatOp op) { visitUnsupported(op); }
+  void visitTypeOp(circt::hw::StructCreateOp op) { visitUnsupported(op); }
+  void visitTypeOp(circt::hw::StructExtractOp op) { visitUnsupported(op); }
+  void visitTypeOp(circt::hw::StructInjectOp op) { visitUnsupported(op); }
+
+  void visitBinary(mlir::Operation *op, std::string_view opStr) {
+    // always emit paraphrases
+    os << '(';
+    auto left = op->getOperand(0);
+    printExpr(left);
+    os << ' ' << opStr << ' ';
+    auto right = op->getOperand(1);
+    printExpr(right);
+    os << ')';
+  }
+
+  void visitUnary(mlir::Operation *op, std::string_view opStr) {
+    // always emit paraphrases
+    os << '(';
+    os << opStr;
+    auto target = op->getOperand(0);
+    printExpr(target);
+    os << ')';
+  }
+
+private:
+  llvm::raw_ostream &os;
+  HWModuleInfo *module;
+
+  static void visitUnsupported(mlir::Operation *op) {
+    op->emitError("Unsupported op in debug expression");
   }
 };
 
@@ -472,21 +602,35 @@ public:
   void visitSV(circt::sv::IfOp op) {
     // first, the statement itself is a line
     builder.createScope(op, currentScope);
+    std::string cond;
+    llvm::raw_string_ostream os(cond);
+    DebugExprPrinter p(os, module);
+    p.printExpr(op.cond());
+    if (cond.empty()) {
+      op->emitError("Unsupported if statement condition");
+      return;
+    }
     if (auto *body = op.getThenBlock()) {
       // true
-      auto *trueBlock = builder.createScope(op, currentScope);
-      auto *temp = currentScope;
-      currentScope = trueBlock;
-      visitBlock(*body);
-      currentScope = temp;
+      if (!body->empty()) {
+        auto *trueBlock = builder.createScope(op, currentScope);
+        auto *temp = currentScope;
+        currentScope = trueBlock;
+        trueBlock->condition = cond;
+        visitBlock(*body);
+        currentScope = temp;
+      }
     }
     if (auto *elseBody = op.getElseBlock()) {
       // false
-      auto *trueBlock = builder.createScope(op, currentScope);
-      auto *temp = currentScope;
-      currentScope = trueBlock;
-      visitBlock(*elseBody);
-      currentScope = temp;
+      if (!elseBody->empty()) {
+        auto *elseBlock = builder.createScope(op, currentScope);
+        auto *temp = currentScope;
+        currentScope = elseBlock;
+        elseBlock->condition = "!" + cond;
+        visitBlock(*elseBody);
+        currentScope = temp;
+      }
     }
   }
 
