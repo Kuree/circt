@@ -74,8 +74,6 @@ public:
     return scopes.empty() ? HWDebugScopeType::None : HWDebugScopeType::Block;
   }
 
-  [[nodiscard]] const std::string &get_filename() const;
-
 protected:
   // NOLINTNEXTLINE
   [[nodiscard]] llvm::json::Object getScopeJSON(bool includeScope) const {
@@ -86,6 +84,9 @@ protected:
     res["type"] = toString(type());
     if (includeScope) {
       setScope(res);
+    }
+    if (type() == HWDebugScopeType::Block) {
+      res["filename"] = filename;
     }
     return res;
   }
@@ -206,19 +207,6 @@ struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
   }
 };
 
-const std::string &HWDebugScope::get_filename() const {
-  auto const *entry = this;
-  while (entry) {
-    if (entry->type() == HWDebugScopeType::Block && !entry->filename.empty()) {
-      return entry->filename;
-    }
-    entry = entry->parent;
-  }
-
-  static std::string empty = {};
-  return empty;
-}
-
 class HWDebugContext {
 public:
   [[nodiscard]] llvm::json::Value toJSON() const {
@@ -249,8 +237,12 @@ public:
     return ptr;
   }
 
+  [[nodiscard]] const std::vector<HWModuleInfo *> &getModules() const {
+    return modules;
+  }
+
 private:
-  std::vector<const HWModuleInfo *> modules;
+  std::vector<HWModuleInfo *> modules;
   std::vector<std::unique_ptr<HWDebugScope>> scopes;
 
   // scope mapping
@@ -382,7 +374,8 @@ public:
     if (hasDebug(op)) {
       auto target = op.dest();
       auto *assign = builder.createAssign(target, op);
-      currentScope->scopes.emplace_back(assign);
+      if (assign)
+        currentScope->scopes.emplace_back(assign);
     }
   }
 
@@ -390,7 +383,8 @@ public:
     if (hasDebug(op)) {
       auto target = op.dest();
       auto *assign = builder.createAssign(target, op);
-      currentScope->scopes.emplace_back(assign);
+      if (assign)
+        currentScope->scopes.emplace_back(assign);
     }
   }
 
@@ -398,7 +392,8 @@ public:
     if (hasDebug(op)) {
       auto target = op.dest();
       auto *assign = builder.createAssign(target, op);
-      currentScope->scopes.emplace_back(assign);
+      if (assign)
+        currentScope->scopes.emplace_back(assign);
     }
   }
 
@@ -407,7 +402,8 @@ public:
     for (auto i = 0u; i < parent.getPorts().outputs.size(); i++) {
       auto operand = op.getOperand(i);
       auto *assign = builder.createAssign(operand, op);
-      currentScope->scopes.emplace_back(assign);
+      if (assign)
+        currentScope->scopes.emplace_back(assign);
     }
   }
 
@@ -551,6 +547,39 @@ private:
   }
 };
 
+mlir::StringAttr getFilenameFromScopeOp(HWDebugScope *scope) {
+  auto loc = scope->op->getLoc().cast<mlir::FileLineColLoc>();
+  return loc.getFilename();
+}
+
+// NOLINTNEXTLINE
+void fixScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
+  // assuming the current scope is already fixed
+  auto scopeFilename = getFilenameFromScopeOp(scope);
+  for (auto i = 0u; i < scope->scopes.size(); i++) {
+    auto *entry = scope->scopes[i];
+    auto entryFilename = getFilenameFromScopeOp(entry);
+    if (entryFilename != scopeFilename) {
+      // need to set this entry's filename
+      if (entry->type() == HWDebugScopeType::Block) {
+        // set its filename
+        entry->filename = entryFilename.str();
+      } else {
+        // need to create a scope to contain this one
+        auto *newScope = builder.createScope(entry->op);
+        newScope->scopes.emplace_back(entry);
+        entry->parent = newScope;
+        newScope->parent = scope;
+        scope->scopes[i] = newScope;
+      }
+    }
+  }
+  // recursively fixing its scopes
+  for (auto *entry : scope->scopes) {
+    fixScopeFilename(entry, builder);
+  }
+}
+
 void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   // collect all the files
   HWDebugContext context;
@@ -568,6 +597,11 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
           auto *body = mod.getBodyBlock();
           visitor.visitBlock(*body);
         });
+  }
+  // fixing filenames
+  auto const &modules = context.getModules();
+  for (auto *m : modules) {
+    fixScopeFilename(m, builder);
   }
   auto json = context.toJSON();
   std::error_code error;
