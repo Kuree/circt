@@ -975,6 +975,7 @@ FIRRTLModuleLowering::lowerModule(FModuleOp oldModule, Block *topLevelModule,
   // we use a hack that nodes always containing filenames
   // even so, some random filenames still get in. need to run a majority
   // vote
+  // FIXME: remove this hack once Chisel/Firrtl fix this issue
   std::unordered_map<std::string, uint32_t> count;
   for (auto &entry : *oldModule.getBody()) {
     if (auto nodeOp = llvm::dyn_cast<NodeOp>(entry)) {
