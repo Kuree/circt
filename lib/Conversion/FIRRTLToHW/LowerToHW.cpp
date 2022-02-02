@@ -970,27 +970,6 @@ FIRRTLModuleLowering::lowerModule(FModuleOp oldModule, Block *topLevelModule,
   if (failed)
     return {};
   loweringState.processRemainingAnnotations(oldModule, annos);
-
-  // need to fix filename. Firrtl does not encode location for module
-  // we use a hack that nodes always containing filenames
-  // even so, some random filenames still get in. need to run a majority
-  // vote
-  // FIXME: remove this hack once Chisel/Firrtl fix this issue
-  std::unordered_map<std::string, uint32_t> count;
-  for (auto &entry : *oldModule.getBody()) {
-    if (auto nodeOp = llvm::dyn_cast<NodeOp>(entry)) {
-      auto filename = nodeOp.getLoc().cast<FileLineColLoc>().getFilename();
-      count[filename.str()]++;
-    }
-  }
-  std::string newFilename = count.begin()->first;
-  for (auto const &[countFilename, c] : count) {
-    if (count.at(newFilename) < c) {
-      newFilename = countFilename;
-    }
-  }
-  newModule->setAttr("hw.debug.filename",
-                     StringAttr::get(newModule->getContext(), newFilename));
   return newModule;
 }
 
@@ -1979,7 +1958,7 @@ Value FIRRTLLowering::getReadInOutOp(Value v) {
   }
 
   result = builder.createOrFold<sv::ReadInOutOp>(v);
-  if (auto vOp = v.getDefiningOp()) {
+  if (auto *vOp = v.getDefiningOp()) {
     if (auto debugAttr = vOp->getAttr("hw.debug.name")) {
       result.getDefiningOp()->setAttr("hw.debug.name", debugAttr);
     }
@@ -2304,8 +2283,8 @@ LogicalResult FIRRTLLowering::visitDecl(NodeOp op) {
   if (symName) {
     auto wire = builder.create<sv::WireOp>(operand.getType(), name, symName);
     auto assign = builder.create<sv::AssignOp>(wire, operand);
-    if (op->hasAttr("hw.debug.name")) {
-      assign->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+    if (auto debugAttr = op->getAttr("hw.debug.name")) {
+      assign->setAttr("hw.debug.name", debugAttr);
     }
   }
 
@@ -3269,8 +3248,8 @@ LogicalResult FIRRTLLowering::visitStmt(ConnectOp op) {
 
     addToAlwaysBlock(clockVal, [&]() {
       auto assignOp = builder.create<sv::PAssignOp>(destVal, srcVal);
-      if (op->hasAttr("hw.debug.name")) {
-        assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+      if (auto debugAttr = op->getAttr("hw.debug.name")) {
+        assignOp->setAttr("hw.debug.name", debugAttr);
       }
       return assignOp;
     });
@@ -3292,8 +3271,8 @@ LogicalResult FIRRTLLowering::visitStmt(ConnectOp op) {
             : ::ResetType::SyncReset,
         sv::EventControl::AtPosEdge, resetSignal, [&]() {
           auto assignOp = builder.create<sv::PAssignOp>(destVal, srcVal);
-          if (op->hasAttr("hw.debug.name")) {
-            assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+          if (auto debugAttr = op->getAttr("hw.debug.name")) {
+            assignOp->setAttr("hw.debug.name", debugAttr);
           }
 
           return assignOp;
@@ -3341,8 +3320,8 @@ LogicalResult FIRRTLLowering::visitStmt(PartialConnectOp op) {
 
     addToAlwaysBlock(clockVal, [&]() {
       auto assignOp = builder.create<sv::PAssignOp>(destVal, srcVal);
-      if (op->hasAttr("hw.debug.name")) {
-        assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+      if (auto debugAttr = op->getAttr("hw.debug.name")) {
+        assignOp->setAttr("hw.debug.name", debugAttr);
       }
       return assignOp;
     });
@@ -3364,8 +3343,8 @@ LogicalResult FIRRTLLowering::visitStmt(PartialConnectOp op) {
         sv::EventControl::AtPosEdge, clockVal, resetStyle,
         sv::EventControl::AtPosEdge, resetSignal, [&]() {
           auto assignOp = builder.create<sv::PAssignOp>(destVal, srcVal);
-          if (op->hasAttr("hw.debug.name")) {
-            assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+          if (auto debugAttr = op->getAttr("hw.debug.name")) {
+            assignOp->setAttr("hw.debug.name", debugAttr);
           }
           return assignOp;
         });
@@ -3399,8 +3378,8 @@ LogicalResult FIRRTLLowering::visitStmt(PartialConnectOp op) {
           })
           .Case<IntType>([&](auto) {
             auto assignOp = builder.create<sv::AssignOp>(dest, src);
-            if (op->hasAttr("hw.debug.name")) {
-              assignOp->setAttr("hw.debug.name", op->getAttr("hw.debug.name"));
+            if (auto debugAttr = op->getAttr("hw.debug.name")) {
+              assignOp->setAttr("hw.debug.name", debugAttr);
             }
             return assignOp;
           })
