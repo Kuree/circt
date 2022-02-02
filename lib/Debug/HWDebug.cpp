@@ -273,7 +273,8 @@ public:
 
   HWDebugScope *getNormalScope(::mlir::Operation *op) {
     auto *ptr = createScope<HWDebugScope>(*this, op);
-    setEntryLocation(*ptr, op->getLoc());
+    if (op)
+      setEntryLocation(*ptr, op->getLoc());
     return ptr;
   }
 
@@ -599,10 +600,7 @@ public:
   void visitSV(circt::sv::IfOp op) {
     // first, the statement itself is a line
     builder.createScope(op, currentScope);
-    std::string cond;
-    llvm::raw_string_ostream os(cond);
-    DebugExprPrinter p(os, module);
-    p.printExpr(op.cond());
+    auto cond = getCondString(op.cond());
     if (cond.empty()) {
       op->emitError("Unsupported if statement condition");
       return;
@@ -632,6 +630,52 @@ public:
     }
   }
 
+  void visitSV(circt::sv::CaseZOp op) {
+    auto cond = getCondString(op.cond());
+    if (cond.empty()) {
+      op->emitError("Unsupported case statement condition");
+      return;
+    }
+
+    auto addScope = [this](const std::string caseCond, mlir::Block *block) {
+      // use nullptr since it's auxiliary
+      auto *scope = builder.createScope(nullptr, currentScope);
+      auto *temp = currentScope;
+      currentScope = scope;
+      scope->condition = caseCond;
+      visitBlock(*block);
+      currentScope = temp;
+    };
+
+    mlir::Block *defaultBlock = nullptr;
+    llvm::SmallVector<uint64_t> values;
+    for (auto caseInfo : op.getCases()) {
+      auto pattern = caseInfo.pattern;
+      if (pattern.isDefault()) {
+        defaultBlock = caseInfo.block;
+      } else {
+        // Currently, hgdb doesn't support z or ?
+        // so we have to turn the pattern into an integer
+        auto value = pattern.attr.getUInt();
+        auto caseCond = cond + " == " + std::to_string(value);
+        addScope(caseCond, caseInfo.block);
+        values.emplace_back(value);
+      }
+    }
+    if (defaultBlock) {
+      // negate all values
+      std::string defaultCond;
+      for (auto i = 0u; i < values.size(); i++) {
+        defaultCond.append("(" + cond + " != " + std::to_string(values[i]) +
+                           ")");
+        if (i != (values.size() - 1)) {
+          defaultCond.append(" && ");
+        }
+      }
+      addScope(defaultCond, defaultBlock);
+    }
+  }
+
   // noop HW visit functions
   void visitStmt(circt::hw::ProbeOp) {}
   void visitStmt(circt::hw::TypedeclOp) {}
@@ -652,7 +696,6 @@ public:
   void visitSV(circt::sv::XMROp) {}
   void visitSV(circt::sv::IfDefOp) {}
   void visitSV(circt::sv::IfDefProceduralOp) {}
-  void visitSV(circt::sv::CaseZOp) {}
   void visitSV(circt::sv::ForceOp) {}
   void visitSV(circt::sv::ReleaseOp) {}
   void visitSV(circt::sv::AliasOp) {}
@@ -703,6 +746,14 @@ private:
   bool hasDebug(mlir::Operation *op) {
     auto r = op && op->hasAttr("hw.debug.name");
     return r;
+  }
+
+  std::string getCondString(mlir::Value value) const {
+    std::string cond;
+    llvm::raw_string_ostream os(cond);
+    DebugExprPrinter p(os, module);
+    p.printExpr(value);
+    return cond;
   }
 };
 
