@@ -401,22 +401,31 @@ public:
   // comb ops
   // supported
   void visitComb(circt::comb::AddOp op) { visitBinary(op, "+"); }
-  void visitComb(circt::comb::SubOp op) { return visitBinary(op, "-"); }
+  void visitComb(circt::comb::SubOp op) { visitBinary(op, "-"); }
   void visitComb(circt::comb::MulOp op) {
     assert(op.getNumOperands() == 2 && "prelowering should handle variadics");
     return visitBinary(op, "*");
   }
-  void visitComb(circt::comb::DivUOp op) { return visitBinary(op, "/"); }
-  void visitComb(circt::comb::DivSOp op) { return visitBinary(op, "/"); }
-  void visitComb(circt::comb::ModUOp op) { return visitBinary(op, "%"); }
-  void visitComb(circt::comb::ModSOp op) { return visitBinary(op, "%"); }
+  void visitComb(circt::comb::DivUOp op) { visitBinary(op, "/"); }
+  void visitComb(circt::comb::DivSOp op) { visitBinary(op, "/"); }
+  void visitComb(circt::comb::ModUOp op) { visitBinary(op, "%"); }
+  void visitComb(circt::comb::ModSOp op) { visitBinary(op, "%"); }
 
-  void visitComb(circt::comb::AndOp op) { return visitBinary(op, "&"); }
-  void visitComb(circt::comb::OrOp op) { return visitBinary(op, "|"); }
+  void visitComb(circt::comb::AndOp op) { visitBinary(op, "&"); }
+  void visitComb(circt::comb::OrOp op) { visitBinary(op, "|"); }
   void visitComb(circt::comb::XorOp op) {
     if (op.isBinaryNot())
-      return visitUnary(op, "~");
-    return visitBinary(op, "^");
+      visitUnary(op, "~");
+    visitBinary(op, "^");
+  }
+
+  void visitComb(circt::comb::ICmpOp op) {
+    // this is copied from ExportVerilog.cpp. probably need some
+    // code refactoring since this is duplicated logic
+    const char *symop[] = {"==", "!=", "<",  "<=", ">",
+                           ">=", "<",  "<=", ">",  ">="};
+    auto pred = static_cast<uint64_t>(op.predicate());
+    visitBinary(op, symop[pred]);
   }
 
   // unsupported
@@ -430,7 +439,6 @@ public:
   void visitComb(circt::comb::ReplicateOp op) { visitUnsupported(op); }
   void visitComb(circt::comb::ConcatOp op) { visitUnsupported(op); }
   void visitComb(circt::comb::ExtractOp op) { visitUnsupported(op); }
-  void visitComb(circt::comb::ICmpOp op) { visitUnsupported(op); }
 
   // type ops
   void visitTypeOp(circt::hw::ConstantOp op) { os << op.value(); }
