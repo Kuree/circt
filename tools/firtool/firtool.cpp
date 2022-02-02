@@ -13,6 +13,7 @@
 
 #include "circt/Conversion/ExportVerilog.h"
 #include "circt/Conversion/Passes.h"
+#include "circt/Debug/HWDebug.h"
 #include "circt/Dialect/Comb/CombDialect.h"
 #include "circt/Dialect/FIRRTL/CHIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRParser.h"
@@ -24,7 +25,6 @@
 #include "circt/Dialect/SV/SVDialect.h"
 #include "circt/Dialect/SV/SVPasses.h"
 #include "circt/Support/LoweringOptions.h"
-#include "circt/Debug/HWDebug.h"
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -213,8 +213,8 @@ static cl::opt<bool>
 
 // generate hgdb symbol table
 static cl::opt<std::string>
-    hgdbDebugFile("hgdb",
-                   cl::desc("file name for hgdb debugger file"), cl::init(""));
+    hgdbDebugFile("hgdb", cl::desc("file name for hgdb debugger file"),
+                  cl::init(""));
 
 enum OutputFormatKind {
   OutputParseOnly,
@@ -369,7 +369,8 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
   // things up.
   if (lowerTypes) {
     pm.addNestedPass<firrtl::CircuitOp>(firrtl::createLowerFIRRTLTypesPass(
-        replSeqMem, preserveAggregate, preservePublicTypes));
+        replSeqMem, preserveAggregate, preservePublicTypes,
+        !hgdbDebugFile.empty()));
     // Only enable expand whens if lower types is also enabled.
     if (expandWhens) {
       auto &modulePM = pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>();

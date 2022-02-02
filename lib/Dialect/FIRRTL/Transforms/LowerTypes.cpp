@@ -311,10 +311,12 @@ namespace {
 struct TypeLoweringVisitor : public FIRRTLVisitor<TypeLoweringVisitor, bool> {
 
   TypeLoweringVisitor(MLIRContext *context, bool flattenAggregateMemData,
-                      bool preserveAggregate, bool preservePublicTypes)
+                      bool preserveAggregate, bool preservePublicTypes,
+                      bool insertDebugInfo)
       : context(context), flattenAggregateMemData(flattenAggregateMemData),
         preserveAggregate(preserveAggregate),
-        preservePublicTypes(preservePublicTypes) {}
+        preservePublicTypes(preservePublicTypes),
+        insertDebugInfo(insertDebugInfo) {}
   using FIRRTLVisitor<TypeLoweringVisitor, bool>::visitDecl;
   using FIRRTLVisitor<TypeLoweringVisitor, bool>::visitExpr;
   using FIRRTLVisitor<TypeLoweringVisitor, bool>::visitStmt;
@@ -374,6 +376,9 @@ private:
   /// Exteranal modules and toplevel modules should have lowered types if this
   /// flag is enabled.
   bool preservePublicTypes;
+
+  // Inserts debug information to keep track of name changes
+  bool insertDebugInfo;
 
   /// The builder is set and maintained in the main loop.
   ImplicitLocOpBuilder *builder;
@@ -495,8 +500,8 @@ bool TypeLoweringVisitor::lowerProducer(
                                                                loweredName));
     if (hasDontTouch)
       newOp->setAttr("inner_sym", StringAttr::get(context, loweredName));
-
-    newOp->setAttr("hw.debug.name", StringAttr::get(context, targetName));
+    if (insertDebugInfo)
+      newOp->setAttr("hw.debug.name", StringAttr::get(context, targetName));
     lowered.push_back(newOp->getResult(0));
   }
 
@@ -584,13 +589,15 @@ bool TypeLoweringVisitor::lowerArg(Operation *module, size_t argIndex,
     // Insert renaming attributes to keep track of the naming changes
     // We store the original name as argName.subFieldName. subFieldName can
     // be either a name or a number
-    auto attrs = mlir::DictionaryAttr::get(
-        context,
-        {{StringAttr::get("hw.debug.name", context),
-          StringAttr::get(context, originalName.str() + "." +
-                                       field.value().suffix.substr(1))}});
+    if (insertDebugInfo) {
+      auto attrs = mlir::DictionaryAttr::get(
+          context,
+          {{StringAttr::get("hw.debug.name", context),
+            StringAttr::get(context, originalName.str() + "." +
+                                         field.value().suffix.substr(1))}});
 
-    newValue.second.annotations.addAnnotations(attrs);
+      newValue.second.annotations.addAnnotations(attrs);
+    }
     newArgs.insert(newArgs.begin() + 1 + argIndex + field.index(),
                    newValue.second);
     // Lower any other arguments by copying them to keep the relative order.
@@ -647,7 +654,9 @@ bool TypeLoweringVisitor::visitStmt(ConnectOp op) {
   // We have to expand connections even if the aggregate preservation is true.
   if (!peelType(op.dest().getType(), fields,
                 /* allowedToPreserveAggregate */ false)) {
-    // store the name as well
+    // Store the name as well if enabled
+    if (!insertDebugInfo)
+      return false;
     auto dest = op.dest();
     if (auto *destOp = dest.getDefiningOp()) {
       if (auto nameAttr = destOp->getAttr("name")) {
@@ -658,7 +667,7 @@ bool TypeLoweringVisitor::visitStmt(ConnectOp op) {
           auto const &results = instOp.results();
           for (auto const &res : results) {
             if (res == dest) {
-              // found this result. need to obtain the name. a little hacky,
+              // Need to obtain the name. a little hacky,
               // but it's the best way I know of
               auto resultNo = res.getResultNumber();
               auto portName = instOp.getPortName(resultNo);
@@ -1142,7 +1151,7 @@ bool TypeLoweringVisitor::visitDecl(WireOp op) {
     return builder->create<WireOp>(field.type, name, attrs, StringAttr{});
   };
   auto handled = lowerProducer(op, clone);
-  if (!handled && !op->hasAttr("hw.debug.name")) {
+  if (insertDebugInfo && !handled && !op->hasAttr("hw.debug.name")) {
     if (auto nameAttr = op->getAttr("name")) {
       op->setAttr("hw.debug.name", nameAttr);
     }
@@ -1170,7 +1179,7 @@ bool TypeLoweringVisitor::visitDecl(RegResetOp op) {
                                        StringAttr{});
   };
   auto handled = lowerProducer(op, clone);
-  if (!handled) {
+  if (insertDebugInfo && !handled) {
     // not a bundle type. op not changed
     if (auto name = op->getAttr("name")) {
       op->setAttr("hw.debug.name", name);
@@ -1400,10 +1409,11 @@ bool TypeLoweringVisitor::visitExpr(SubaccessOp op) {
 namespace {
 struct LowerTypesPass : public LowerFIRRTLTypesBase<LowerTypesPass> {
   LowerTypesPass(bool flattenAggregateMemDataFlag, bool preserveAggregateFlag,
-                 bool preservePublicTypesFlag) {
+                 bool preservePublicTypesFlag, bool insertDebugInfoFlag) {
     flattenAggregateMemData = flattenAggregateMemDataFlag;
     preserveAggregate = preserveAggregateFlag;
     preservePublicTypes = preservePublicTypesFlag;
+    insertDebugInfo = insertDebugInfoFlag;
   }
   void runOnOperation() override;
 };
@@ -1417,15 +1427,16 @@ void LowerTypesPass::runOnOperation() {
 
   mlir::parallelForEachN(&getContext(), 0, ops.size(), [&](auto index) {
     TypeLoweringVisitor(&getContext(), flattenAggregateMemData,
-                        preserveAggregate, preservePublicTypes)
+                        preserveAggregate, preservePublicTypes, insertDebugInfo)
         .lowerModule(ops[index]);
   });
 }
 
 /// This is the pass constructor.
 std::unique_ptr<mlir::Pass> circt::firrtl::createLowerFIRRTLTypesPass(
-    bool replSeqMem, bool preserveAggregate, bool preservePublicTypes) {
+    bool replSeqMem, bool preserveAggregate, bool preservePublicTypes,
+    bool insertDebugInfo) {
 
   return std::make_unique<LowerTypesPass>(replSeqMem, preserveAggregate,
-                                          preservePublicTypes);
+                                          preservePublicTypes, insertDebugInfo);
 }
