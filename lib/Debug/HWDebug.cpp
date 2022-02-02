@@ -1,11 +1,6 @@
 #define GET_OP_CLASSES
 
-#include <map>
 #include <memory>
-#include <optional>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 #include "circt/Dialect/Comb/CombVisitors.h"
 #include "circt/Dialect/HW/HWOps.h"
@@ -38,7 +33,7 @@ void setEntryLocation(HWDebugScope &scope, const mlir::Location &location,
 
 enum class HWDebugScopeType { None, Assign, Declare, Module, Block };
 
-std::string toString(HWDebugScopeType type) {
+mlir::StringRef toString(HWDebugScopeType type) {
   switch (type) {
   case HWDebugScopeType::None:
     return "none";
@@ -60,12 +55,12 @@ public:
   explicit HWDebugScope(HWDebugContext &context, mlir::Operation *op)
       : context(context), op(op) {}
 
-  std::vector<HWDebugScope *> scopes;
+  llvm::SmallVector<HWDebugScope *> scopes;
 
-  std::string filename;
+  mlir::StringRef filename;
   uint32_t line = 0;
   uint32_t column = 0;
-  std::string condition;
+  mlir::StringRef condition;
 
   HWDebugScope *parent = nullptr;
 
@@ -122,8 +117,6 @@ struct HWDebugLineInfo : HWDebugScope {
     Declare = static_cast<int>(HWDebugScopeType::Declare),
   };
 
-  std::string condition;
-
   LineType lineType;
 
   HWDebugLineInfo(HWDebugContext &context, LineType type, mlir::Operation *op)
@@ -143,8 +136,8 @@ struct HWDebugLineInfo : HWDebugScope {
 };
 
 struct HWDebugVarDef {
-  std::string name;
-  std::string value;
+  mlir::StringRef name;
+  mlir::StringRef value;
   // for how it's always RTL value
   bool rtl = true;
 
@@ -156,10 +149,10 @@ struct HWDebugVarDef {
 struct HWModuleInfo : public HWDebugScope {
 public:
   // module names
-  std::string name;
+  mlir::StringRef name;
 
-  std::vector<HWDebugVarDef> variables;
-  std::map<std::string, std::string> instances;
+  llvm::SmallVector<HWDebugVarDef> variables;
+  llvm::DenseMap<mlir::StringRef, mlir::StringRef> instances;
 
   explicit HWModuleInfo(HWDebugContext &context,
                         circt::hw::HWModuleOp *moduleOp)
@@ -238,10 +231,10 @@ struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
   }
 };
 
-std::string findTop(const std::vector<HWModuleInfo *> &modules) {
-  std::unordered_set<std::string> names;
+mlir::StringRef findTop(const llvm::SmallVector<HWModuleInfo *> &modules) {
+  llvm::SmallDenseSet<mlir::StringRef> names;
   for (auto const *mod : modules) {
-    names.emplace(mod->name);
+    names.insert(mod->name);
   }
   for (auto const *m : modules) {
     for (auto const &[_, name] : m->instances) {
@@ -284,16 +277,13 @@ public:
     return ptr;
   }
 
-  [[nodiscard]] const std::vector<HWModuleInfo *> &getModules() const {
+  [[nodiscard]] const llvm::SmallVector<HWModuleInfo *> &getModules() const {
     return modules;
   }
 
 private:
-  std::vector<HWModuleInfo *> modules;
-  std::vector<std::unique_ptr<HWDebugScope>> scopes;
-
-  // scope mapping
-  std::unordered_map<const ::mlir::Operation *, HWDebugScope *> scopeMappings;
+  llvm::SmallVector<HWModuleInfo *> modules;
+  llvm::SmallVector<std::unique_ptr<HWDebugScope>> scopes;
 };
 
 void setEntryLocation(HWDebugScope &scope, const mlir::Location &location,
@@ -347,8 +337,8 @@ public:
   HWDebugVarDef createVarDef(::mlir::Operation *op) {
     // the OP has to have this attr. need to check before calling this function
     auto frontEndName =
-        op->getAttr("hw.debug.name").cast<mlir::StringAttr>().str();
-    auto rtlName = ::getSymOpName(op).str();
+        op->getAttr("hw.debug.name").cast<mlir::StringAttr>().strref();
+    auto rtlName = ::getSymOpName(op);
     HWDebugVarDef var{.name = frontEndName, .value = rtlName, .rtl = true};
     return var;
   }
@@ -455,7 +445,7 @@ public:
   void visitTypeOp(circt::hw::StructExtractOp op) { visitUnsupported(op); }
   void visitTypeOp(circt::hw::StructInjectOp op) { visitUnsupported(op); }
 
-  void visitBinary(mlir::Operation *op, std::string_view opStr) {
+  void visitBinary(mlir::Operation *op, mlir::StringRef opStr) {
     // always emit paraphrases
     os << '(';
     auto left = op->getOperand(0);
@@ -466,7 +456,7 @@ public:
     os << ')';
   }
 
-  void visitUnary(mlir::Operation *op, std::string_view opStr) {
+  void visitUnary(mlir::Operation *op, mlir::StringRef opStr) {
     // always emit paraphrases
     os << '(';
     os << opStr;
@@ -492,11 +482,10 @@ public:
 
   void visitStmt(circt::hw::InstanceOp op) {
     auto instNameRef = ::getSymOpName(op);
-    auto instNameStr = std::string(instNameRef.begin(), instNameRef.end());
     // need to find definition names
     auto *mod = op.getReferencedModule(nullptr);
-    auto moduleNameStr = circt::hw::getVerilogModuleNameAttr(mod).str();
-    module->instances.emplace(instNameStr, moduleNameStr);
+    auto moduleNameStr = circt::hw::getVerilogModuleNameAttr(mod).strref();
+    module->instances.insert(std::make_pair(instNameRef, moduleNameStr));
   }
 
   void visitSV(circt::sv::RegOp op) {
@@ -616,7 +605,7 @@ public:
         auto *trueBlock = builder.createScope(op, currentScope);
         auto *temp = currentScope;
         currentScope = trueBlock;
-        trueBlock->condition = cond;
+        trueBlock->condition = mlir::StringAttr::get(op.getContext(), cond);
         visitBlock(*body);
         currentScope = temp;
       }
@@ -627,7 +616,8 @@ public:
         auto *elseBlock = builder.createScope(op, currentScope);
         auto *temp = currentScope;
         currentScope = elseBlock;
-        elseBlock->condition = "!" + cond;
+        elseBlock->condition =
+            mlir::StringAttr::get(op->getContext(), "!" + cond);
         visitBlock(*elseBody);
         currentScope = temp;
       }
@@ -724,13 +714,13 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
       // need to set this entry's filename
       if (entry->type() == HWDebugScopeType::Block) {
         // set its filename
-        entry->filename = entryFilename.str();
+        entry->filename = entryFilename;
       } else {
         // need to create a scope to contain this one
         auto *newScope = builder.createScope(entry->op);
         // set the line to 0 since it's an artificial scope
         newScope->line = 0;
-        newScope->filename = entryFilename.str();
+        newScope->filename = entryFilename;
         newScope->scopes.emplace_back(entry);
         entry->parent = newScope;
         newScope->parent = scope;
@@ -753,7 +743,7 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
         auto *parent = filenameMapping[filename];
         // merge
         parent->scopes.reserve(entry->scopes.size() + parent->scopes.size());
-        for (auto *p: entry->scopes) {
+        for (auto *p : entry->scopes) {
           parent->scopes.emplace_back(p);
           p->parent = p;
         }
@@ -782,9 +772,7 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
     mlir::TypeSwitch<mlir::Operation *>(&op).Case<circt::hw::HWModuleOp>(
         [&builder](circt::hw::HWModuleOp mod) {
           // get verilog name
-          auto defName = circt::hw::getVerilogModuleNameAttr(mod).str();
-          if (defName.empty())
-            return;
+          auto defName = circt::hw::getVerilogModuleNameAttr(mod);
           auto *module = builder.createModule(&mod);
           module->name = defName;
           DebugStmtVisitor visitor(builder, module);
