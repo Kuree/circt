@@ -274,12 +274,12 @@ struct TypeLoweringVisitor : public FIRRTLVisitor<TypeLoweringVisitor, bool> {
 
   TypeLoweringVisitor(MLIRContext *context, bool flattenAggregateMemData,
                       bool preserveAggregate, bool preservePublicTypes,
-                      SmallVector<NlaNameNewSym> &nlaSymList, bool insertDebugInfo)
+                      SmallVector<NlaNameNewSym> &nlaSymList,
+                      bool insertDebugInfo)
       : context(context), flattenAggregateMemData(flattenAggregateMemData),
         preserveAggregate(preserveAggregate),
         preservePublicTypes(preservePublicTypes),
-        nlaNameToNewSymList(nlaSymList),
-insertDebugInfo(insertDebugInfo) {}
+        insertDebugInfo(insertDebugInfo), nlaNameToNewSymList(nlaSymList) {}
   using FIRRTLVisitor<TypeLoweringVisitor, bool>::visitDecl;
   using FIRRTLVisitor<TypeLoweringVisitor, bool>::visitExpr;
   using FIRRTLVisitor<TypeLoweringVisitor, bool>::visitStmt;
@@ -633,7 +633,7 @@ bool TypeLoweringVisitor::lowerArg(Operation *module, size_t argIndex,
     if (insertDebugInfo) {
       auto attrs = mlir::DictionaryAttr::get(
           context,
-          {{StringAttr::get("hw.debug.name", context),
+          {{StringAttr::get(context, "hw.debug.name"),
             StringAttr::get(context, originalName.str() + "." +
                                          field.value().suffix.substr(1))}});
 
@@ -715,7 +715,7 @@ bool TypeLoweringVisitor::visitStmt(ConnectOp op) {
               auto nameStr = nameAttr.cast<mlir::StringAttr>().str() + "_" +
                              portName.str();
               op->setAttr("hw.debug.name",
-                          mlir::StringAttr::get(nameStr, context));
+                          mlir::StringAttr::get(context, nameStr));
               break;
             }
           }
