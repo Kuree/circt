@@ -632,8 +632,17 @@ bool TypeLoweringVisitor::lowerArg(Operation *module, size_t argIndex,
   SmallVector<FlatBundleFieldEntry> fieldTypes;
   auto srcType = newArgs[argIndex].type.cast<FIRRTLType>();
   if (!peelType(srcType, fieldTypes,
-                isModuleAllowedToPreserveAggregate(module)))
+                isModuleAllowedToPreserveAggregate(module))) {
+    // Use its default name instead
+    if (insertDebugInfo) {
+      auto attrs = mlir::DictionaryAttr::get(
+          context, {{StringAttr::get(context, "hw.debug.name"),
+                     newArgs[argIndex].name}});
+      newArgs[argIndex].annotations.addAnnotations(attrs);
+    }
+
     return false;
+  }
 
   // Get original arg name
   auto originalName = newArgs[argIndex].name;
