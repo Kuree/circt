@@ -493,8 +493,18 @@ bool TypeLoweringVisitor::lowerProducer(
   auto srcType = op->getResult(0).getType().cast<FIRRTLType>();
   SmallVector<FlatBundleFieldEntry, 8> fieldTypes;
 
-  if (!peelType(srcType, fieldTypes, preserveAggregate))
+  if (!peelType(srcType, fieldTypes, preserveAggregate)) {
+    if (insertDebugInfo && !op->hasAttr("hw.debug.name")) {
+      // If it's not a temp nodes produced by Chisel. For now, we use a
+      // naming heuristics: all temp nodes are prefixed with _. However, in
+      // case where users create such node, this hack will fail
+      if (auto nameAttr = op->getAttrOfType<StringAttr>("name")) {
+        if (nameAttr.size() > 0 && nameAttr.data()[0] != '_')
+          op->setAttr("hw.debug.name", nameAttr);
+      }
+    }
     return false;
+  }
 
   SmallVector<Value> lowered;
   // Loop over the leaf aggregates.
