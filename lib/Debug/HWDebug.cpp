@@ -82,11 +82,18 @@ public:
 protected:
   // NOLINTNEXTLINE
   [[nodiscard]] llvm::json::Object getScopeJSON(bool includeScope) const {
-    llvm::json::Object res{{"line", line}};
-    if (column > 0) {
-      res["column"] = column;
+    llvm::json::Object res;
+    auto scopeType = type();
+    if (scopeType != HWDebugScopeType::Block &&
+        scopeType != HWDebugScopeType::Module) {
+      // block and module does not have line number
+      res["line"] = line;
+      if (column > 0) {
+        res["column"] = column;
+      }
     }
-    res["type"] = toString(type());
+
+    res["type"] = toString(scopeType);
     if (includeScope) {
       setScope(res);
     }
@@ -775,7 +782,8 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
   for (auto i = 0u; i < scope->scopes.size(); i++) {
     auto *entry = scope->scopes[i];
     auto entryFilename = getFilenameFromScopeOp(entry);
-    if (entryFilename != scopeFilename) {
+    if (entryFilename != scopeFilename ||
+        scope->type() != HWDebugScopeType::Block) {
       // need to set this entry's filename
       if (entry->type() == HWDebugScopeType::Block) {
         // set its filename
@@ -798,9 +806,7 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
   llvm::DenseMap<mlir::StringRef, HWDebugScope *> filenameMapping;
   for (auto i = 0u; i < scope->scopes.size(); i++) {
     auto *entry = scope->scopes[i];
-    // we only touch non-existing block, i.e. created for holding actual
-    // scopes
-    if (entry->type() == HWDebugScopeType::Block && entry->line == 0) {
+    if (entry->type() == HWDebugScopeType::Block) {
       auto filename = entry->filename;
       if (filenameMapping.find(filename) == filenameMapping.end()) {
         filenameMapping[filename] = entry;
