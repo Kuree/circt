@@ -160,6 +160,7 @@ public:
   mlir::StringRef name;
 
   llvm::SmallVector<HWDebugVarDef> variables;
+  llvm::SmallVector<mlir::Value> varDefs;
   llvm::DenseMap<mlir::StringRef, mlir::StringRef> instances;
 
   explicit HWModuleInfo(HWDebugContext &context,
@@ -516,6 +517,7 @@ public:
     if (hasDebug(op)) {
       auto var = builder.createVarDef(op);
       module->variables.emplace_back(var);
+      module->varDefs.emplace_back(op);
     }
   }
 
@@ -523,6 +525,7 @@ public:
     if (hasDebug(op)) {
       auto var = builder.createVarDef(op);
       module->variables.emplace_back(var);
+      module->varDefs.emplace_back(op);
     }
   }
 
@@ -770,6 +773,10 @@ private:
   }
 };
 
+mlir::StringRef getFilenameFromValue(mlir::Value value) {
+  return value.getLoc().cast<mlir::FileLineColLoc>().getFilename().strref();
+}
+
 mlir::StringAttr getFilenameFromScopeOp(HWDebugScope *scope) {
   auto loc = scope->op->getLoc().cast<mlir::FileLineColLoc>();
   return loc.getFilename();
@@ -835,21 +842,24 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
   }
 }
 
-// NOLINTNEXTLINE
-void reorderScopeEntries(HWDebugScope *scope) {
-  // We need stable sort to preserve the column and line information
-  if (scope->type() == HWDebugScopeType::Block) {
-    std::stable_sort(scope->scopes.begin(), scope->scopes.end(),
-                     [](auto const *lhs, auto const *rhs) {
-                       return lhs->column < rhs->column;
-                     });
-    std::stable_sort(
-        scope->scopes.begin(), scope->scopes.end(),
-        [](auto const *lhs, auto const *rhs) { return lhs->line < rhs->line; });
+void insertVarDecl(HWModuleInfo *module, HWDebugBuilder &builder) {
+  if (module->variables.empty())
+    return;
+  llvm::DenseMap<mlir::StringRef, HWDebugScope *> namesMap;
+  for (auto *scope : module->scopes) {
+    namesMap.insert(std::make_pair(scope->filename, scope));
   }
-
-  for (auto *entry : scope->scopes) {
-    reorderScopeEntries(entry);
+  // Binary search the scopes to find the best match
+  for (auto value : module->varDefs) {
+    auto varFilename = getFilenameFromValue(value);
+    if (namesMap.find(varFilename) == namesMap.end())
+      continue;
+    auto *scope = namesMap[varFilename];
+    // No need to worry about the ordering since it will be handled by
+    // the debugger
+    auto *decl = builder.createVarDeclaration(value);
+    if (decl)
+      scope->scopes.emplace_back(decl);
   }
 }
 
@@ -869,11 +879,11 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
           visitor.visitBlock(*body);
         });
   }
-  // fixing filenames
+  // Fixing filenames and other scope ordering
   auto const &modules = context.getModules();
   for (auto *m : modules) {
     setScopeFilename(m, builder);
-    reorderScopeEntries(m);
+    insertVarDecl(m, builder);
   }
   auto json = context.toJSON();
 
