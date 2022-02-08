@@ -835,6 +835,24 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
   }
 }
 
+// NOLINTNEXTLINE
+void reorderScopeEntries(HWDebugScope *scope) {
+  // We need stable sort to preserve the column and line information
+  if (scope->type() == HWDebugScopeType::Block) {
+    std::stable_sort(scope->scopes.begin(), scope->scopes.end(),
+                     [](auto const *lhs, auto const *rhs) {
+                       return lhs->column < rhs->column;
+                     });
+    std::stable_sort(
+        scope->scopes.begin(), scope->scopes.end(),
+        [](auto const *lhs, auto const *rhs) { return lhs->line < rhs->line; });
+  }
+
+  for (auto *entry : scope->scopes) {
+    reorderScopeEntries(entry);
+  }
+}
+
 void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   // collect all the files
   HWDebugContext context;
@@ -855,6 +873,7 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   auto const &modules = context.getModules();
   for (auto *m : modules) {
     setScopeFilename(m, builder);
+    reorderScopeEntries(m);
   }
   auto json = context.toJSON();
 
