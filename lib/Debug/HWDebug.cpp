@@ -27,6 +27,7 @@ namespace circt::debug {
 
 struct HWDebugScope;
 class HWDebugContext;
+class HWDebugBuilder;
 
 void setEntryLocation(HWDebugScope &scope, const mlir::Location &location,
                       mlir::Operation *op = nullptr);
@@ -148,9 +149,22 @@ struct HWDebugVarDef {
   mlir::StringRef value;
   // for how it's always RTL value
   bool rtl = true;
+  mlir::StringAttr id;
+
+  HWDebugVarDef(mlir::StringRef name, mlir::StringRef value, bool rtl,
+                mlir::StringAttr id)
+      : name(name), value(value), rtl(rtl), id(id) {}
 
   [[nodiscard]] llvm::json::Value toJSON() const {
+    if (id) {
+      return llvm::json::Value(id);
+    }
     return llvm::json::Object({{"name", name}, {"value", value}, {"rtl", rtl}});
+  }
+
+  [[nodiscard]] llvm::json::Value toJSONDefinition() const {
+    return llvm::json::Object(
+        {{"name", name}, {"value", value}, {"rtl", rtl}, {"id", id.strref()}});
   }
 };
 
@@ -159,7 +173,7 @@ public:
   // module names
   mlir::StringRef name;
 
-  llvm::SmallVector<HWDebugVarDef> variables;
+  mlir::SmallVector<const HWDebugVarDef *> variables;
   llvm::DenseMap<mlir::StringRef, mlir::StringRef> instances;
 
   explicit HWModuleInfo(HWDebugContext &context,
@@ -176,8 +190,10 @@ public:
       }
       // also add to the generator variables
       if (port.debugAttr) {
-        variables.emplace_back(HWDebugVarDef{
-            .name = port.debugAttr.strref(), .value = n, .rtl = true});
+
+        outputPorts.emplace_back(std::make_unique<HWDebugVarDef>(
+            port.debugAttr.strref(), n, true, mlir::StringAttr{}));
+        variables.emplace_back(outputPorts.back().get());
       }
     }
   }
@@ -188,8 +204,8 @@ public:
 
     llvm::json::Array vars;
     vars.reserve(variables.size());
-    for (auto const &varDef : variables) {
-      vars.emplace_back(varDef.toJSON());
+    for (auto const *varDef : variables) {
+      vars.emplace_back(varDef->toJSON());
     }
     res["variables"] = std::move(vars);
 
@@ -215,17 +231,18 @@ public:
 
 private:
   llvm::DenseMap<mlir::Value, mlir::StringRef> portNames;
+  llvm::SmallVector<std::unique_ptr<HWDebugVarDef>> outputPorts;
 };
 
 struct HWDebugVarDeclareLineInfo : public HWDebugLineInfo {
   HWDebugVarDeclareLineInfo(HWDebugContext &context, mlir::Operation *op)
       : HWDebugLineInfo(context, LineType::Declare, op) {}
 
-  HWDebugVarDef variable;
+  HWDebugVarDef *variable;
 
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = HWDebugLineInfo::toJSON();
-    (*res.getAsObject())["variable"] = std::move(variable.toJSON());
+    (*res.getAsObject())["variable"] = variable->toJSON();
     return res;
   }
 };
@@ -235,11 +252,11 @@ struct HWDebugVarAssignLineInfo : public HWDebugLineInfo {
   HWDebugVarAssignLineInfo(HWDebugContext &context, mlir::Operation *op)
       : HWDebugLineInfo(context, LineType::Assign, op) {}
 
-  HWDebugVarDef variable;
+  HWDebugVarDef *variable;
 
   [[nodiscard]] llvm::json::Value toJSON() const override {
     auto res = HWDebugLineInfo::toJSON();
-    (*res.getAsObject())["variable"] = std::move(variable.toJSON());
+    (*res.getAsObject())["variable"] = variable->toJSON();
     return res;
   }
 };
@@ -268,6 +285,15 @@ public:
       array.emplace_back(std::move(module->toJSON()));
     }
     res["table"] = std::move(array);
+    // if we have variable reference in the context
+    if (!vars.empty()) {
+      array.clear();
+      array.reserve(vars.size());
+      for (auto const &[_, var] : vars) {
+        array.emplace_back(std::move(var->toJSONDefinition()));
+      }
+      res["variables"] = std::move(array);
+    }
     auto top = findTop(modules);
     res["top"] = top;
     return res;
@@ -298,6 +324,9 @@ public:
 private:
   llvm::SmallVector<HWModuleInfo *> modules;
   llvm::SmallVector<std::unique_ptr<HWDebugScope>> scopes;
+  llvm::DenseMap<const mlir::Operation *, std::unique_ptr<HWDebugVarDef>> vars;
+
+  friend HWDebugBuilder;
 };
 
 void setEntryLocation(HWDebugScope &scope, const mlir::Location &location,
@@ -348,13 +377,24 @@ public:
     return assign;
   }
 
-  HWDebugVarDef createVarDef(::mlir::Operation *op) {
-    // the OP has to have this attr. need to check before calling this function
-    auto frontEndName =
-        op->getAttr("hw.debug.name").cast<mlir::StringAttr>().strref();
-    auto rtlName = ::getSymOpName(op);
-    HWDebugVarDef var{frontEndName, rtlName, true};
-    return var;
+  HWDebugVarDef *createVarDef(::mlir::Operation *op) {
+    auto it = context.vars.find(op);
+    if (it == context.vars.end()) {
+      // The OP has to have this attr. need to check before calling this
+      // function
+      auto frontEndName =
+          op->getAttr("hw.debug.name").cast<mlir::StringAttr>().strref();
+      auto rtlName = ::getSymOpName(op);
+      // For now, we use the size of the map as ID
+      auto id = mlir::StringAttr::get(op->getContext(),
+                                      std::to_string(context.vars.size()));
+      auto var =
+          std::make_unique<HWDebugVarDef>(frontEndName, rtlName, true, id);
+
+      it = context.vars.insert(std::make_pair(op, std::move(var))).first;
+    }
+
+    return it->second.get();
   }
 
   HWModuleInfo *createModule(circt::hw::HWModuleOp *op) {
@@ -514,7 +554,7 @@ public:
     // we treat this as a generator variable
     // only generate if we have annotated in the frontend
     if (hasDebug(op)) {
-      auto var = builder.createVarDef(op);
+      auto *var = builder.createVarDef(op);
       module->variables.emplace_back(var);
 
       if (currentScope) {
