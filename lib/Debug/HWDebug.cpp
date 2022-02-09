@@ -160,7 +160,6 @@ public:
   mlir::StringRef name;
 
   llvm::SmallVector<HWDebugVarDef> variables;
-  llvm::SmallVector<mlir::Value> varDefs;
   llvm::DenseMap<mlir::StringRef, mlir::StringRef> instances;
 
   explicit HWModuleInfo(HWDebugContext &context,
@@ -517,7 +516,11 @@ public:
     if (hasDebug(op)) {
       auto var = builder.createVarDef(op);
       module->variables.emplace_back(var);
-      module->varDefs.emplace_back(op);
+
+      if (currentScope) {
+        auto *varDecl = builder.createVarDeclaration(op);
+        currentScope->scopes.emplace_back(varDecl);
+      }
     }
   }
 
@@ -525,7 +528,11 @@ public:
     if (hasDebug(op)) {
       auto var = builder.createVarDef(op);
       module->variables.emplace_back(var);
-      module->varDefs.emplace_back(op);
+
+      if (currentScope) {
+        auto *varDecl = builder.createVarDeclaration(op);
+        currentScope->scopes.emplace_back(varDecl);
+      }
     }
   }
 
@@ -810,15 +817,19 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
   }
   // merge scopes with the same filename
   // we assume at this stage most of the entries are block entry now
-  llvm::DenseMap<mlir::StringRef, HWDebugScope *> filenameMapping;
+  // we can only merge
+  llvm::DenseMap<std::pair<mlir::StringRef, mlir::StringRef>, HWDebugScope *>
+      filenameMapping;
   for (auto i = 0u; i < scope->scopes.size(); i++) {
     auto *entry = scope->scopes[i];
     if (entry->type() == HWDebugScopeType::Block) {
       auto filename = entry->filename;
-      if (filenameMapping.find(filename) == filenameMapping.end()) {
-        filenameMapping[filename] = entry;
+      auto cond = entry->condition;
+      auto keyEntry = std::make_pair(filename, cond);
+      if (filenameMapping.find(keyEntry) == filenameMapping.end()) {
+        filenameMapping[keyEntry] = entry;
       } else {
-        auto *parent = filenameMapping[filename];
+        auto *parent = filenameMapping[keyEntry];
         // merge
         parent->scopes.reserve(entry->scopes.size() + parent->scopes.size());
         for (auto *p : entry->scopes) {
@@ -842,27 +853,6 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
   }
 }
 
-void insertVarDecl(HWModuleInfo *module, HWDebugBuilder &builder) {
-  if (module->variables.empty())
-    return;
-  llvm::DenseMap<mlir::StringRef, HWDebugScope *> namesMap;
-  for (auto *scope : module->scopes) {
-    namesMap.insert(std::make_pair(scope->filename, scope));
-  }
-  // Binary search the scopes to find the best match
-  for (auto value : module->varDefs) {
-    auto varFilename = getFilenameFromValue(value);
-    if (namesMap.find(varFilename) == namesMap.end())
-      continue;
-    auto *scope = namesMap[varFilename];
-    // No need to worry about the ordering since it will be handled by
-    // the debugger
-    auto *decl = builder.createVarDeclaration(value);
-    if (decl)
-      scope->scopes.emplace_back(decl);
-  }
-}
-
 void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   // collect all the files
   HWDebugContext context;
@@ -883,7 +873,6 @@ void exportDebugTable(mlir::ModuleOp moduleOp, const std::string &filename) {
   auto const &modules = context.getModules();
   for (auto *m : modules) {
     setScopeFilename(m, builder);
-    insertVarDecl(m, builder);
   }
   auto json = context.toJSON();
 
