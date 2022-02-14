@@ -785,6 +785,7 @@ public:
   void visitSV(circt::sv::ErrorOp) {}
   void visitSV(circt::sv::WarningOp) {}
   void visitSV(circt::sv::InfoOp) {}
+  void visitSV(circt::sv::SampledOp) {}
 
   // ignore invalid stuff
   void visitInvalidStmt(Operation *) {}
