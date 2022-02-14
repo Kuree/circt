@@ -29,8 +29,7 @@ struct HWDebugScope;
 class HWDebugContext;
 class HWDebugBuilder;
 
-void setEntryLocation(HWDebugScope &scope, const mlir::Location &location,
-                      mlir::Operation *op = nullptr);
+void setEntryLocation(HWDebugScope &scope, const mlir::Location &location);
 
 enum class HWDebugScopeType { None, Assign, Declare, Module, Block };
 
@@ -329,16 +328,34 @@ private:
   friend HWDebugBuilder;
 };
 
-void setEntryLocation(HWDebugScope &scope, const mlir::Location &location,
-                      mlir::Operation *op) {
+// NOLINTNEXTLINE
+mlir::FileLineColLoc getFileLineColLocFromLoc(const mlir::Location &location) {
+  // if it's a fused location, the first one will be used
+  if (auto const fileLoc = location.dyn_cast<mlir::FileLineColLoc>()) {
+    return fileLoc;
+  }
+  if (auto const fusedLoc = location.dyn_cast<mlir::FusedLoc>()) {
+    auto const &locs = fusedLoc.getLocations();
+    for (auto const &loc : locs) {
+      auto res = getFileLineColLocFromLoc(loc);
+      if (res)
+        return res;
+    }
+  }
+  return {};
+}
+
+void setEntryLocation(HWDebugScope &scope, const mlir::Location &location) {
   // need to get the containing module, as well as the line number
   // information
-  auto const fileLoc = location.cast<::mlir::FileLineColLoc>();
-  auto const line = fileLoc.getLine();
-  auto const column = fileLoc.getColumn();
+  auto const fileLoc = getFileLineColLocFromLoc(location);
+  if (fileLoc) {
+    auto const line = fileLoc.getLine();
+    auto const column = fileLoc.getColumn();
 
-  scope.line = line;
-  scope.column = column;
+    scope.line = line;
+    scope.column = column;
+  }
 }
 
 class HWDebugBuilder {
@@ -399,7 +416,7 @@ public:
 
   HWModuleInfo *createModule(circt::hw::HWModuleOp *op) {
     auto *info = context.createScope<HWModuleInfo>(context, op);
-    setEntryLocation(*info, op->getLoc(), op->getOperation());
+    setEntryLocation(*info, op->getLoc());
     return info;
   }
 
@@ -442,8 +459,11 @@ public:
   void printExpr(mlir::Value value) {
     auto *op = value.getDefiningOp();
     if (op && ExportVerilog::isVerilogExpression(op)) {
-      os << getSymOpName(op);
-      return;
+      auto name = getSymOpName(op);
+      if (!name.empty()) {
+        os << name;
+        return;
+      }
     }
     if (op) {
       dispatchCombinationalVisitor(op);
@@ -506,6 +526,8 @@ public:
   void visitTypeOp(circt::hw::StructCreateOp op) { visitUnsupported(op); }
   void visitTypeOp(circt::hw::StructExtractOp op) { visitUnsupported(op); }
   void visitTypeOp(circt::hw::StructInjectOp op) { visitUnsupported(op); }
+  // noop
+  void visitInvalidComb(Operation *op) { return dispatchTypeOpVisitor(op); }
 
   void visitBinary(mlir::Operation *op, mlir::StringRef opStr) {
     // always emit paraphrases
@@ -662,12 +684,14 @@ public:
 
   void visitSV(circt::sv::IfOp op) {
     // first, the statement itself is a line
-    builder.createScope(op, currentScope);
     auto cond = getCondString(op.cond());
     if (cond.empty()) {
-      op->emitError("Unsupported if statement condition");
+      op.cond().getDefiningOp()->emitError(
+          "Unsupported if statement condition");
+      cond = getCondString(op.cond());
       return;
     }
+    builder.createScope(op, currentScope);
     if (auto *body = op.getThenBlock()) {
       // true
       if (!body->empty()) {
@@ -679,7 +703,8 @@ public:
         currentScope = temp;
       }
     }
-    if (auto *elseBody = op.getElseBlock()) {
+    if (op.hasElse()) {
+      auto *elseBody = op.getElseBlock();
       // false
       if (!elseBody->empty()) {
         auto *elseBlock = builder.createScope(op, currentScope);
@@ -821,13 +846,10 @@ private:
   }
 };
 
-mlir::StringRef getFilenameFromValue(mlir::Value value) {
-  return value.getLoc().cast<mlir::FileLineColLoc>().getFilename().strref();
-}
-
 mlir::StringAttr getFilenameFromScopeOp(HWDebugScope *scope) {
-  auto loc = scope->op->getLoc().cast<mlir::FileLineColLoc>();
-  return loc.getFilename();
+  // if it's fused location, the
+  auto loc = getFileLineColLocFromLoc(scope->op->getLoc());
+  return loc ? loc.getFilename() : mlir::StringAttr{};
 }
 
 // NOLINTNEXTLINE
@@ -837,6 +859,12 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
   for (auto i = 0u; i < scope->scopes.size(); i++) {
     auto *entry = scope->scopes[i];
     auto entryFilename = getFilenameFromScopeOp(entry);
+    // unable to determine this scope's filename
+    if (!entryFilename) {
+      // delete it from the scope
+      scope->scopes[i] = nullptr;
+      continue;
+    }
     if (entryFilename != scopeFilename ||
         scope->type() != HWDebugScopeType::Block) {
       // need to set this entry's filename
@@ -863,6 +891,8 @@ void setScopeFilename(HWDebugScope *scope, HWDebugBuilder &builder) {
       filenameMapping;
   for (auto i = 0u; i < scope->scopes.size(); i++) {
     auto *entry = scope->scopes[i];
+    if (!entry)
+      continue;
     if (entry->type() == HWDebugScopeType::Block) {
       auto filename = entry->filename;
       auto cond = entry->condition;
