@@ -1460,6 +1460,7 @@ struct FIRRTLLowering : public FIRRTLVisitor<FIRRTLLowering, LogicalResult> {
   LogicalResult visitStmt(CoverOp op);
   LogicalResult visitStmt(AttachOp op);
   LogicalResult visitStmt(ProbeOp op);
+  LogicalResult visitStmt(WhenOp op);
 
 private:
   /// The module we're lowering into.
@@ -3918,5 +3919,26 @@ LogicalResult FIRRTLLowering::visitStmt(ProbeOp op) {
 
   builder.create<hw::ProbeOp>(op.inner_sym(), operands);
 
+  return success();
+}
+
+LogicalResult FIRRTLLowering::visitStmt(WhenOp op) {
+  auto thenBlock = [&, this]() {
+    auto &block = op.getThenBlock();
+    for (auto &blockOp : block) {
+      succeeded(dispatchVisitor(&blockOp));
+    }
+  };
+
+  auto elseBlock = [&, this]() {
+    if (op.hasElseRegion()) {
+      auto &block = op.getElseBlock();
+      for (auto &blockOp : block) {
+        succeeded(dispatchVisitor(&blockOp));
+      }
+    }
+  };
+
+  builder.create<sv::IfOp>(op.condition(), thenBlock, elseBlock);
   return success();
 }
