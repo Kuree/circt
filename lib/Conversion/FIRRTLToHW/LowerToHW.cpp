@@ -3939,6 +3939,6 @@ LogicalResult FIRRTLLowering::visitStmt(WhenOp op) {
     }
   };
 
-  builder.create<sv::IfOp>(op.condition(), thenBlock, elseBlock);
+  builder.create<sv::IfOp>(op.getLoc(), op.condition(), thenBlock, elseBlock);
   return success();
 }

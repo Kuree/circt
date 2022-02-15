@@ -446,7 +446,7 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
         replSeqMem, preserveAggregate, preservePublicTypes,
         !hgdbDebugFile.empty()));
     // Only enable expand whens if lower types is also enabled.
-    if (expandWhens) {
+    if (expandWhens && hgdbDebugFile.empty()) {
       auto &modulePM = pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>();
       modulePM.addPass(firrtl::createExpandWhensPass());
       modulePM.addPass(firrtl::createRemoveResetsPass());
