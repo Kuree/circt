@@ -551,10 +551,6 @@ public:
 private:
   llvm::raw_ostream &os;
   HWModuleInfo *module;
-
-  static void visitUnsupported(mlir::Operation *op) {
-    op->emitError("Unsupported op in debug expression");
-  }
 };
 
 class DebugStmtVisitor : public circt::hw::StmtVisitor<DebugStmtVisitor>,
@@ -563,6 +559,8 @@ public:
   DebugStmtVisitor(HWDebugBuilder &builder, HWModuleInfo *module)
       : builder(builder), module(module), currentScope(module) {}
 
+  using StmtVisitor::visitStmt;
+
   void visitStmt(circt::hw::InstanceOp op) {
     auto instNameRef = ::getSymOpName(op);
     // need to find definition names
@@ -570,6 +568,8 @@ public:
     auto moduleNameStr = circt::hw::getVerilogModuleNameAttr(mod).strref();
     module->instances.insert(std::make_pair(instNameRef, moduleNameStr));
   }
+
+  using Visitor::visitSV;
 
   void visitSV(circt::sv::RegOp op) {
     // we treat this as a generator variable
@@ -754,62 +754,13 @@ public:
     }
   }
 
-  // noop HW visit functions
-  void visitStmt(circt::hw::ProbeOp) {}
-  void visitStmt(circt::hw::TypedeclOp) {}
-
-  void visitStmt(circt::hw::TypeScopeOp op) {}
-
-  // noop SV visit functions
-  void visitSV(circt::sv::ReadInOutOp) {}
-  void visitSV(circt::sv::ArrayIndexInOutOp) {}
-  void visitSV(circt::sv::VerbatimExprOp) {}
-  void visitSV(circt::sv::VerbatimExprSEOp) {}
-  void visitSV(circt::sv::IndexedPartSelectInOutOp) {}
-  void visitSV(circt::sv::IndexedPartSelectOp) {}
-  void visitSV(circt::sv::StructFieldInOutOp) {}
-  void visitSV(circt::sv::ConstantXOp) {}
-  void visitSV(circt::sv::ConstantZOp) {}
-  void visitSV(circt::sv::LocalParamOp) {}
-  void visitSV(circt::sv::XMROp) {}
-  void visitSV(circt::sv::IfDefOp) {}
-  void visitSV(circt::sv::IfDefProceduralOp) {}
-  void visitSV(circt::sv::ForceOp) {}
-  void visitSV(circt::sv::ReleaseOp) {}
-  void visitSV(circt::sv::AliasOp) {}
-  void visitSV(circt::sv::FWriteOp) {}
-  void visitSV(circt::sv::VerbatimOp) {}
-  void visitSV(circt::sv::InterfaceOp) {}
-  void visitSV(circt::sv::InterfaceSignalOp) {}
-  void visitSV(circt::sv::InterfaceModportOp) {}
-  void visitSV(circt::sv::InterfaceInstanceOp) {}
-  void visitSV(circt::sv::GetModportOp) {}
-  void visitSV(circt::sv::AssignInterfaceSignalOp) {}
-  void visitSV(circt::sv::ReadInterfaceSignalOp) {}
-  void visitSV(circt::sv::AssertOp) {}
-  void visitSV(circt::sv::AssumeOp) {}
-  void visitSV(circt::sv::CoverOp) {}
-  void visitSV(circt::sv::AssertConcurrentOp) {}
-  void visitSV(circt::sv::AssumeConcurrentOp) {}
-  void visitSV(circt::sv::CoverConcurrentOp) {}
-  void visitSV(circt::sv::BindOp) {}
-  void visitSV(circt::sv::StopOp) {}
-  void visitSV(circt::sv::FinishOp) {}
-  void visitSV(circt::sv::ExitOp) {}
-  void visitSV(circt::sv::FatalOp) {}
-  void visitSV(circt::sv::ErrorOp) {}
-  void visitSV(circt::sv::WarningOp) {}
-  void visitSV(circt::sv::InfoOp) {}
-  void visitSV(circt::sv::SampledOp) {}
-
   // ignore invalid stuff
-  void visitInvalidStmt(Operation *) {}
+  void visitInvalidStmt(Operation *op) { dispatchSVVisitor(op); }
   void visitInvalidSV(Operation *) {}
+  void visitUnhandledStmt(Operation *) {}
+  void visitUnhandledSV(Operation *) {}
 
-  void dispatch(mlir::Operation *op) {
-    dispatchStmtVisitor(op);
-    dispatchSVVisitor(op);
-  }
+  void dispatch(mlir::Operation *op) { dispatchStmtVisitor(op); }
 
   void visitBlock(mlir::Block &block) {
     for (auto &op : block) {
