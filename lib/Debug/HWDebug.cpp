@@ -603,28 +603,19 @@ public:
   // we only care about the target of the assignment
   void visitSV(circt::sv::AssignOp op) {
     if (hasDebug(op)) {
-      auto target = op.dest();
-      auto *assign = builder.createAssign(target, op);
-      if (assign)
-        currentScope->scopes.emplace_back(assign);
+      handleAssign(op.dest(), op.src(), op);
     }
   }
 
   void visitSV(circt::sv::BPAssignOp op) {
     if (hasDebug(op)) {
-      auto target = op.dest();
-      auto *assign = builder.createAssign(target, op);
-      if (assign)
-        currentScope->scopes.emplace_back(assign);
+      handleAssign(op.dest(), op.src(), op);
     }
   }
 
   void visitSV(circt::sv::PAssignOp op) {
     if (hasDebug(op)) {
-      auto target = op.dest();
-      auto *assign = builder.createAssign(target, op);
-      if (assign)
-        currentScope->scopes.emplace_back(assign);
+      handleAssign(op.dest(), op.src(), op);
     }
   }
 
@@ -844,6 +835,43 @@ private:
     DebugExprPrinter p(os, module);
     p.printExpr(value);
     return cond;
+  }
+
+  // NOLINTNEXTLINE
+  void handleAssign(mlir::Value target, mlir::Value value, mlir::Operation *op) {
+    if (auto mux = value.dyn_cast<circt::comb::MuxOp>()) {
+      // create a new scope, which can be merged later on
+      auto *temp = currentScope;
+      // true
+      {
+        auto *scope = builder.createScope(mux.getOperation(), currentScope);
+        auto cond = getCondString(mux.cond());
+        if (cond.empty()) {
+          mux->emitError("Unable to obtain mux condition expression");
+        }
+        scope->condition = cond;
+        currentScope = scope;
+        handleAssign(target, mux.trueValue(), mux.trueValue().getDefiningOp());
+      }
+      currentScope = temp;
+
+      {
+        auto *scope = builder.createScope(mux.getOperation(), currentScope);
+        auto cond = getCondString(mux.cond());
+        if (cond.empty()) {
+          mux->emitError("Unable to obtain mux condition expression");
+        }
+        scope->condition = mlir::StringAttr::get(op->getContext(), "!" + cond);
+        currentScope = scope;
+        handleAssign(target, mux.falseValue(),
+                     mux.falseValue().getDefiningOp());
+      }
+      currentScope = temp;
+    }
+    // not a mux, create an assignment
+    auto *assign = builder.createAssign(target, op);
+    if (assign)
+      currentScope->scopes.emplace_back(assign);
   }
 };
 
