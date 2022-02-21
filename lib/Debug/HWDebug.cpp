@@ -601,19 +601,19 @@ public:
   // we only care about the target of the assignment
   void visitSV(circt::sv::AssignOp op) {
     if (hasDebug(op)) {
-      handleAssign(op.dest(), op.src(), op.src().getDefiningOp());
+      handleAssign(op.dest(), op.src(), op.src().getDefiningOp(), op);
     }
   }
 
   void visitSV(circt::sv::BPAssignOp op) {
     if (hasDebug(op)) {
-      handleAssign(op.dest(), op.src(), op.src().getDefiningOp());
+      handleAssign(op.dest(), op.src(), op.src().getDefiningOp(), op);
     }
   }
 
   void visitSV(circt::sv::PAssignOp op) {
     if (hasDebug(op)) {
-      handleAssign(op.dest(), op.src(), op.src().getDefiningOp());
+      handleAssign(op.dest(), op.src(), op.src().getDefiningOp(), op);
     }
   }
 
@@ -788,7 +788,7 @@ private:
 
   // NOLINTNEXTLINE
   void handleAssign(mlir::Value target, mlir::Value value,
-                    mlir::Operation *op) {
+                    mlir::Operation *op, mlir::Operation *assignOp) {
     bool handled = false;
     if (op) {
       mlir::TypeSwitch<Operation *, void>(op).Case<circt::comb::MuxOp>(
@@ -806,7 +806,7 @@ private:
               scope->condition = StringAttr::get(op->getContext(), cond);
               currentScope = scope;
               handleAssign(target, mux.trueValue(),
-                           mux.trueValue().getDefiningOp());
+                           mux.trueValue().getDefiningOp(), assignOp);
             }
             currentScope = temp;
 
@@ -821,7 +821,7 @@ private:
                   mlir::StringAttr::get(op->getContext(), "!" + cond);
               currentScope = scope;
               handleAssign(target, mux.falseValue(),
-                           mux.falseValue().getDefiningOp());
+                           mux.falseValue().getDefiningOp(), assignOp);
             }
             currentScope = temp;
             handled = true;
@@ -829,7 +829,8 @@ private:
     }
     // not handled yet, create an assignment
     if (!handled) {
-      auto *assign = builder.createAssign(target, op);
+      auto *assign =
+          builder.createAssign(target, op ? op : assignOp);
       if (assign)
         currentScope->scopes.emplace_back(assign);
     }
