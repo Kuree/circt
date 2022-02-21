@@ -787,8 +787,8 @@ private:
   }
 
   // NOLINTNEXTLINE
-  void handleAssign(mlir::Value target, mlir::Value value,
-                    mlir::Operation *op, mlir::Operation *assignOp) {
+  void handleAssign(mlir::Value target, mlir::Value value, mlir::Operation *op,
+                    mlir::Operation *assignOp) {
     bool handled = false;
     if (op) {
       mlir::TypeSwitch<Operation *, void>(op).Case<circt::comb::MuxOp>(
@@ -829,8 +829,7 @@ private:
     }
     // not handled yet, create an assignment
     if (!handled) {
-      auto *assign =
-          builder.createAssign(target, op ? op : assignOp);
+      auto *assign = builder.createAssign(target, op ? op : assignOp);
       if (assign)
         currentScope->scopes.emplace_back(assign);
     }
